@@ -8,7 +8,9 @@ use std::{
   sync::{Arc, Mutex},
 };
 
-use http::{Request, Response as HttpResponse, StatusCode, header::CONTENT_TYPE};
+use http::{
+  Request, Response as HttpResponse, StatusCode, header::CONTENT_TYPE,
+};
 use tauri_utils::config::HeaderAddition;
 
 use crate::{
@@ -72,7 +74,8 @@ fn get_response<R: Runtime>(
   web_resource_request_handler: Option<&WebResourceRequestHandler>,
   (url, response_cache): (&str, &Arc<Mutex<HashMap<String, CachedResponse>>>),
 ) -> Result<HttpResponse<Cow<'static, [u8]>>, Box<dyn std::error::Error>> {
-  let proxy_dev_server = PROXY_DEV_SERVER && manager.assets.iter().next().is_none();
+  let proxy_dev_server =
+    PROXY_DEV_SERVER && manager.assets.iter().next().is_none();
   // use the entire URI as we are going to proxy the request
   let path = if proxy_dev_server {
     request.uri().to_string()
@@ -153,42 +156,148 @@ fn get_response<R: Runtime>(
       }
     }
 
+    // Disable automatic decompression so that Content-Length and
+    // Content-Encoding headers from the upstream remain consistent
+    // with the body bytes. Without this, reqwest silently decompresses
+    // gzipped responses but forwards the original (compressed)
+    // Content-Length header, causing a length mismatch.
     let mut proxy_builder = client
+      .no_gzip()
+      .no_brotli()
+      .no_deflate()
       .build()
       .unwrap()
       .request(request.method().clone(), &url);
-    proxy_builder = proxy_builder.body(std::mem::take(request.body_mut()));
+
+    // Forward all request headers (including Range) to the dev server
     for (name, value) in request.headers() {
       proxy_builder = proxy_builder.header(name, value);
     }
-    proxy_builder = proxy_builder.body(request.body().clone());
+
+    // Forward request body (only relevant for POST/PUT, but correct for all methods)
+    proxy_builder = proxy_builder.body(std::mem::take(request.body_mut()));
+
     match crate::async_runtime::safe_block_on(proxy_builder.send()) {
       Ok(r) => {
-        let mut response_cache_ = response_cache.lock().unwrap();
-        let mut response = None;
-        if r.status() == http::StatusCode::NOT_MODIFIED {
-          response = response_cache_.get(&url);
+        let status = r.status();
+        let upstream_headers = r.headers().clone();
+        let body = crate::async_runtime::safe_block_on(r.bytes())?;
+
+        // Only cache 200 OK responses. Never cache:
+        // - 206 Partial Content: cache key doesn't include Range header,
+        //   so a cached partial response would be served for different
+        //   byte ranges, causing ERR_REQUEST_RANGE_NOT_SATISFIABLE.
+        // - 304 Not Modified: only use cached entry if one exists.
+        if status == http::StatusCode::NOT_MODIFIED {
+          let response_cache_ = response_cache.lock().unwrap();
+          if let Some(cached) = response_cache_.get(&url) {
+            for (name, value) in &cached.headers {
+              builder = builder.header(name, value);
+            }
+            return Ok(
+              builder
+                .status(cached.status)
+                .body(cached.body.to_vec().into())?,
+            );
+          }
+          // No cached entry for 304 — fall through and return as-is
+        } else if status == http::StatusCode::OK {
+          let mut response_cache_ = response_cache.lock().unwrap();
+          response_cache_.insert(
+            url.clone(),
+            CachedResponse {
+              status,
+              headers: upstream_headers.clone(),
+              body: body.clone(),
+            },
+          );
         }
-        let response = if let Some(r) = response {
-          r
+
+        // CEF's media stack on http://tauri.localhost completely ignores
+        // Cache-Control headers (including no-store) for 206 Partial Content
+        // responses. It caches the 206 entry and then fails subsequent Range
+        // requests for different byte ranges with ERR_REQUEST_RANGE_NOT_SATISFIABLE.
+        //
+        // Fix: when the 206 response contains the full resource (the common case
+        // since our proxy fully buffers), rewrite it to 200 OK and drop the
+        // Content-Range header. CEF's cache then stores the complete resource
+        // and can serve any subsequent Range request from cache.
+        let is_full_resource_206 = status == http::StatusCode::PARTIAL_CONTENT
+          && upstream_headers
+            .get(http::header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .map(|cr| {
+              if let Some(rest) = cr.strip_prefix("bytes ") {
+                if let Some((range_part, total_str)) = rest.split_once('/') {
+                  let mut parts = range_part.splitn(2, '-');
+                  if let (Some(s), Some(e)) = (parts.next(), parts.next()) {
+                    if let (Ok(start), Ok(end), Ok(total)) = (
+                      s.parse::<u64>(),
+                      e.parse::<u64>(),
+                      total_str.parse::<u64>(),
+                    ) {
+                      return start == 0 && end == total - 1;
+                    }
+                  }
+                }
+              }
+              false
+            })
+            .unwrap_or(false);
+
+        let final_status = if is_full_resource_206 {
+          http::StatusCode::OK
         } else {
-          let status = r.status();
-          let headers = r.headers().clone();
-          let body = crate::async_runtime::safe_block_on(r.bytes())?;
-          let response = CachedResponse {
-            status,
-            headers,
-            body,
-          };
-          response_cache_.insert(url.clone(), response);
-          response_cache_.get(&url).unwrap()
+          status
         };
-        for (name, value) in &response.headers {
+
+        // Forward upstream headers, skipping headers we manage ourselves
+        for (name, value) in &upstream_headers {
+          if name == http::header::CONTENT_LENGTH {
+            continue;
+          }
+          // When converting 206→200, drop Content-Range (no longer partial)
+          // and Cache-Control/Pragma (we want CEF to cache the full resource)
+          if is_full_resource_206
+            && (name == http::header::CONTENT_RANGE
+              || name == http::header::CACHE_CONTROL
+              || name == http::header::PRAGMA)
+          {
+            continue;
+          }
+          // For genuinely partial 206, strip any caching headers to prevent
+          // CEF from caching a partial response
+          if status == http::StatusCode::PARTIAL_CONTENT
+            && !is_full_resource_206
+            && (name == http::header::CACHE_CONTROL
+              || name == http::header::PRAGMA)
+          {
+            continue;
+          }
           builder = builder.header(name, value);
         }
-        builder
-          .status(response.status)
-          .body(response.body.to_vec().into())?
+
+        // Set Content-Length to match the actual body we're sending
+        builder = builder.header(http::header::CONTENT_LENGTH, body.len());
+
+        // For converted 200: let CEF cache the full resource normally
+        if is_full_resource_206 {
+          builder = builder.header(
+            http::header::CACHE_CONTROL,
+            "public, max-age=31536000, immutable",
+          );
+        }
+        // For genuinely partial 206: force no caching
+        else if status == http::StatusCode::PARTIAL_CONTENT {
+          builder = builder
+            .header(
+              http::header::CACHE_CONTROL,
+              "no-store, no-cache, must-revalidate",
+            )
+            .header(http::header::PRAGMA, "no-cache");
+        }
+
+        builder.status(final_status).body(body.to_vec().into())?
       }
       Err(e) => {
         let error_message = format!(
@@ -208,7 +317,8 @@ fn get_response<R: Runtime>(
       }
     }
   } else {
-    let use_https_scheme = request.uri().scheme() == Some(&http::uri::Scheme::HTTPS);
+    let use_https_scheme =
+      request.uri().scheme() == Some(&http::uri::Scheme::HTTPS);
     let asset = manager.get_asset(path, use_https_scheme)?;
     builder = builder.header(CONTENT_TYPE, &asset.mime_type);
     if let Some(csp) = &asset.csp_header {

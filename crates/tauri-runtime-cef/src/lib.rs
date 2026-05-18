@@ -7,15 +7,17 @@
 
 use cef::{CefString, ImplCommandLine, ImplTaskRunner};
 use tauri_runtime::{
-  Cookie, DeviceEventFilter, EventLoopProxy, Icon, InitAttribute, ProgressBarState, Result,
-  RunEvent, Runtime, RuntimeHandle, RuntimeInitArgs, UserAttentionType, UserEvent, WebviewDispatch,
-  WebviewEventId, WindowDispatch, WindowEventId,
+  Cookie, DeviceEventFilter, EventLoopProxy, Icon, InitAttribute,
+  ProgressBarState, Result, RunEvent, Runtime, RuntimeHandle, RuntimeInitArgs,
+  UserAttentionType, UserEvent, WebviewDispatch, WebviewEventId,
+  WindowDispatch, WindowEventId,
   dpi::{PhysicalPosition, PhysicalSize, Position, Rect, Size},
   monitor::Monitor,
   webview::{DetachedWebview, PendingWebview},
   window::{
-    CursorIcon, DetachedWindow, DetachedWindowWebview, PendingWindow, RawWindow, WebviewEvent,
-    WindowBuilder, WindowBuilderBase, WindowEvent, WindowId,
+    CursorIcon, DetachedWindow, DetachedWindowWebview, PendingWindow,
+    RawWindow, WebviewEvent, WindowBuilder, WindowBuilderBase, WindowEvent,
+    WindowId,
   },
 };
 
@@ -149,7 +151,10 @@ enum WindowMessage {
   IsAlwaysOnTop(Sender<Result<bool>>),
   RawWindowHandle(
     Sender<
-      std::result::Result<raw_window_handle::WindowHandle<'static>, raw_window_handle::HandleError>,
+      std::result::Result<
+        raw_window_handle::WindowHandle<'static>,
+        raw_window_handle::HandleError,
+      >,
     >,
   ),
   // Setters
@@ -284,11 +289,13 @@ pub(crate) struct AppWebview {
   pub bounds: Arc<Mutex<Option<WebviewBounds>>>,
   #[allow(unused)]
   pub devtools_enabled: bool,
-  pub uri_scheme_protocols:
-    Arc<HashMap<String, Arc<Box<tauri_runtime::webview::UriSchemeProtocolHandler>>>>,
+  pub uri_scheme_protocols: Arc<
+    HashMap<String, Arc<Box<tauri_runtime::webview::UriSchemeProtocolHandler>>>,
+  >,
   #[allow(dead_code)]
   pub initialization_scripts: Arc<Vec<cef_impl::CefInitScript>>,
-  pub devtools_protocol_handlers: Arc<Mutex<Vec<Arc<dyn Fn(DevToolsProtocol) + Send + Sync>>>>,
+  pub devtools_protocol_handlers:
+    Arc<Mutex<Vec<Arc<dyn Fn(DevToolsProtocol) + Send + Sync>>>>,
   /// Keeps the DevTools message observer registered. Dropping this unregisters the observer.
   #[allow(dead_code)]
   pub devtools_observer_registration: Arc<Mutex<Option<cef::Registration>>>,
@@ -303,10 +310,18 @@ pub struct WebviewBounds {
 }
 
 pub type WindowEventHandler = Box<dyn Fn(&WindowEvent) + Send>;
-pub type WindowEventListeners = Arc<Mutex<HashMap<WindowEventId, WindowEventHandler>>>;
-pub type WebviewEventHandler = Box<dyn Fn(&tauri_runtime::window::WebviewEvent) + Send>;
-pub type WebviewEventListeners =
-  Arc<Mutex<HashMap<u32, Arc<Mutex<HashMap<tauri_runtime::WebviewEventId, WebviewEventHandler>>>>>>;
+pub type WindowEventListeners =
+  Arc<Mutex<HashMap<WindowEventId, WindowEventHandler>>>;
+pub type WebviewEventHandler =
+  Box<dyn Fn(&tauri_runtime::window::WebviewEvent) + Send>;
+pub type WebviewEventListeners = Arc<
+  Mutex<
+    HashMap<
+      u32,
+      Arc<Mutex<HashMap<tauri_runtime::WebviewEventId, WebviewEventHandler>>>,
+    >,
+  >,
+>;
 
 pub(crate) enum AppWindowKind {
   Window(cef::Window),
@@ -355,12 +370,12 @@ impl<T: UserEvent> RuntimeContext<T> {
       Ok(())
     } else {
       // Post to main thread via TaskRunner
-      self
-        .main_thread_task_runner
-        .post_task(Some(&mut cef_impl::SendMessageTask::new(
+      self.main_thread_task_runner.post_task(Some(
+        &mut cef_impl::SendMessageTask::new(
           self.cef_context.clone(),
           Arc::new(RefCell::new(message)),
-        )));
+        ),
+      ));
       Ok(())
     }
   }
@@ -388,7 +403,8 @@ impl<T: UserEvent> RuntimeContext<T> {
       window_id,
       webview_id: webview_id.unwrap_or_default(),
       pending: Box::new(pending),
-      after_window_creation: after_window_creation.map(|f| Box::new(f) as AfterWindowCreation),
+      after_window_creation: after_window_creation
+        .map(|f| Box::new(f) as AfterWindowCreation),
     })?;
 
     let dispatcher = CefWindowDispatcher {
@@ -452,12 +468,12 @@ pub(crate) fn send_user_message<T: UserEvent>(
   if thread::current().id() == context.main_thread_id {
     cef_impl::handle_message(&context.cef_context, message);
   } else {
-    context
-      .main_thread_task_runner
-      .post_task(Some(&mut cef_impl::SendMessageTask::new(
+    context.main_thread_task_runner.post_task(Some(
+      &mut cef_impl::SendMessageTask::new(
         context.cef_context.clone(),
         Arc::new(RefCell::new(message)),
-      )));
+      ),
+    ));
   }
   Ok(())
 }
@@ -518,30 +534,42 @@ impl<T: UserEvent> RuntimeHandle<T> for CefRuntimeHandle<T> {
   }
 
   /// Run a task on the main thread.
-  fn run_on_main_thread<F: FnOnce() + Send + 'static>(&self, f: F) -> Result<()> {
+  fn run_on_main_thread<F: FnOnce() + Send + 'static>(
+    &self,
+    f: F,
+  ) -> Result<()> {
     self.context.post_message(Message::Task(Box::new(f)))
   }
 
   fn display_handle(
     &self,
-  ) -> std::result::Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+  ) -> std::result::Result<
+    raw_window_handle::DisplayHandle<'_>,
+    raw_window_handle::HandleError,
+  > {
     #[cfg(target_os = "linux")]
     return Ok(unsafe {
-      raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Xlib(
-        raw_window_handle::XlibDisplayHandle::new(None, 0),
-      ))
+      raw_window_handle::DisplayHandle::borrow_raw(
+        raw_window_handle::RawDisplayHandle::Xlib(
+          raw_window_handle::XlibDisplayHandle::new(None, 0),
+        ),
+      )
     });
     #[cfg(target_os = "macos")]
     return Ok(unsafe {
-      raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::AppKit(
-        raw_window_handle::AppKitDisplayHandle::new(),
-      ))
+      raw_window_handle::DisplayHandle::borrow_raw(
+        raw_window_handle::RawDisplayHandle::AppKit(
+          raw_window_handle::AppKitDisplayHandle::new(),
+        ),
+      )
     });
     #[cfg(windows)]
     return Ok(unsafe {
-      raw_window_handle::DisplayHandle::borrow_raw(raw_window_handle::RawDisplayHandle::Windows(
-        raw_window_handle::WindowsDisplayHandle::new(),
-      ))
+      raw_window_handle::DisplayHandle::borrow_raw(
+        raw_window_handle::RawDisplayHandle::Windows(
+          raw_window_handle::WindowsDisplayHandle::new(),
+        ),
+      )
     });
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     unimplemented!();
@@ -588,7 +616,9 @@ impl<T: UserEvent> RuntimeHandle<T> for CefRuntimeHandle<T> {
   #[cfg(target_os = "android")]
   fn run_on_android_context<F>(&self, f: F)
   where
-    F: FnOnce(&mut jni::JNIEnv, &jni::objects::JObject, &jni::objects::JObject) + Send + 'static,
+    F: FnOnce(&mut jni::JNIEnv, &jni::objects::JObject, &jni::objects::JObject)
+      + Send
+      + 'static,
   {
     todo!()
   }
@@ -771,18 +801,23 @@ impl WindowBuilder for CefWindowBuilder {
       .minimizable(config.minimizable)
       .shadow(config.shadow);
 
-    let mut constraints = tauri_runtime::window::WindowSizeConstraints::default();
+    let mut constraints =
+      tauri_runtime::window::WindowSizeConstraints::default();
     if let Some(min_width) = config.min_width {
-      constraints.min_width = Some(tauri_runtime::dpi::LogicalUnit::new(min_width).into());
+      constraints.min_width =
+        Some(tauri_runtime::dpi::LogicalUnit::new(min_width).into());
     }
     if let Some(min_height) = config.min_height {
-      constraints.min_height = Some(tauri_runtime::dpi::LogicalUnit::new(min_height).into());
+      constraints.min_height =
+        Some(tauri_runtime::dpi::LogicalUnit::new(min_height).into());
     }
     if let Some(max_width) = config.max_width {
-      constraints.max_width = Some(tauri_runtime::dpi::LogicalUnit::new(max_width).into());
+      constraints.max_width =
+        Some(tauri_runtime::dpi::LogicalUnit::new(max_width).into());
     }
     if let Some(max_height) = config.max_height {
-      constraints.max_height = Some(tauri_runtime::dpi::LogicalUnit::new(max_height).into());
+      constraints.max_height =
+        Some(tauri_runtime::dpi::LogicalUnit::new(max_height).into());
     }
     builder = builder.inner_size_constraints(constraints);
 
@@ -812,9 +847,9 @@ impl WindowBuilder for CefWindowBuilder {
         builder = builder.tabbing_identifier(identifier);
       }
       if let Some(position) = &config.traffic_light_position {
-        builder = builder.traffic_light_position(tauri_runtime::dpi::LogicalPosition::new(
-          position.x, position.y,
-        ));
+        builder = builder.traffic_light_position(
+          tauri_runtime::dpi::LogicalPosition::new(position.x, position.y),
+        );
       }
     }
 
@@ -834,30 +869,30 @@ impl WindowBuilder for CefWindowBuilder {
   }
 
   fn position(mut self, x: f64, y: f64) -> Self {
-    self.position = Some(Position::Logical(tauri_runtime::dpi::LogicalPosition::new(
-      x, y,
-    )));
+    self.position = Some(Position::Logical(
+      tauri_runtime::dpi::LogicalPosition::new(x, y),
+    ));
     self
   }
 
   fn inner_size(mut self, width: f64, height: f64) -> Self {
-    self.inner_size = Some(Size::Logical(tauri_runtime::dpi::LogicalSize::new(
-      width, height,
-    )));
+    self.inner_size = Some(Size::Logical(
+      tauri_runtime::dpi::LogicalSize::new(width, height),
+    ));
     self
   }
 
   fn min_inner_size(mut self, min_width: f64, min_height: f64) -> Self {
-    self.min_inner_size = Some(Size::Logical(tauri_runtime::dpi::LogicalSize::new(
-      min_width, min_height,
-    )));
+    self.min_inner_size = Some(Size::Logical(
+      tauri_runtime::dpi::LogicalSize::new(min_width, min_height),
+    ));
     self
   }
 
   fn max_inner_size(mut self, max_width: f64, max_height: f64) -> Self {
-    self.max_inner_size = Some(Size::Logical(tauri_runtime::dpi::LogicalSize::new(
-      max_width, max_height,
-    )));
+    self.max_inner_size = Some(Size::Logical(
+      tauri_runtime::dpi::LogicalSize::new(max_width, max_height),
+    ));
     self
   }
 
@@ -951,7 +986,10 @@ impl WindowBuilder for CefWindowBuilder {
     self
   }
 
-  fn visible_on_all_workspaces(mut self, visible_on_all_workspaces: bool) -> Self {
+  fn visible_on_all_workspaces(
+    mut self,
+    visible_on_all_workspaces: bool,
+  ) -> Self {
     self.visible_on_all_workspaces = Some(visible_on_all_workspaces);
     self
   }
@@ -1086,7 +1124,9 @@ impl<T: UserEvent> CefWebviewDispatcher<T> {
 
   /// Register a callback to receive DevTools protocol messages. Messages include
   /// both method results and events from the DevTools agent.
-  pub fn on_dev_tools_protocol<F: Fn(DevToolsProtocol) + Send + Sync + 'static>(
+  pub fn on_dev_tools_protocol<
+    F: Fn(DevToolsProtocol) + Send + Sync + 'static,
+  >(
     &self,
     f: F,
   ) -> Result<()> {
@@ -1106,11 +1146,16 @@ impl<T: UserEvent> CefWebviewDispatcher<T> {
 impl<T: UserEvent> WebviewDispatch<T> for CefWebviewDispatcher<T> {
   type Runtime = CefRuntime<T>;
 
-  fn run_on_main_thread<F: FnOnce() + Send + 'static>(&self, f: F) -> Result<()> {
+  fn run_on_main_thread<F: FnOnce() + Send + 'static>(
+    &self,
+    f: F,
+  ) -> Result<()> {
     self.context.post_message(Message::Task(Box::new(f)))
   }
 
-  fn on_webview_event<F: Fn(&tauri_runtime::window::WebviewEvent) + Send + 'static>(
+  fn on_webview_event<
+    F: Fn(&tauri_runtime::window::WebviewEvent) + Send + 'static,
+  >(
     &self,
     f: F,
   ) -> tauri_runtime::WebviewEventId {
@@ -1123,7 +1168,10 @@ impl<T: UserEvent> WebviewDispatch<T> for CefWebviewDispatcher<T> {
     id
   }
 
-  fn with_webview<F: FnOnce(Box<dyn std::any::Any>) + Send + 'static>(&self, f: F) -> Result<()> {
+  fn with_webview<F: FnOnce(Box<dyn std::any::Any>) + Send + 'static>(
+    &self,
+    f: F,
+  ) -> Result<()> {
     self.context.post_message(Message::Webview {
       window_id: *self.window_id.lock().unwrap(),
       webview_id: self.webview_id,
@@ -1353,7 +1401,10 @@ impl<T: UserEvent> WebviewDispatch<T> for CefWebviewDispatcher<T> {
     })
   }
 
-  fn set_background_color(&self, color: Option<tauri_utils::config::Color>) -> Result<()> {
+  fn set_background_color(
+    &self,
+    color: Option<tauri_utils::config::Color>,
+  ) -> Result<()> {
     self.context.post_message(Message::Webview {
       window_id: *self.window_id.lock().unwrap(),
       webview_id: self.webview_id,
@@ -1367,11 +1418,17 @@ impl<T: UserEvent> WindowDispatch<T> for CefWindowDispatcher<T> {
 
   type WindowBuilder = CefWindowBuilder;
 
-  fn run_on_main_thread<F: FnOnce() + Send + 'static>(&self, f: F) -> Result<()> {
+  fn run_on_main_thread<F: FnOnce() + Send + 'static>(
+    &self,
+    f: F,
+  ) -> Result<()> {
     self.context.post_message(Message::Task(Box::new(f)))
   }
 
-  fn on_window_event<F: Fn(&WindowEvent) + Send + 'static>(&self, f: F) -> WindowEventId {
+  fn on_window_event<F: Fn(&WindowEvent) + Send + 'static>(
+    &self,
+    f: F,
+  ) -> WindowEventId {
     let context = self.context.clone();
     let window_id = self.window_id;
     let event_id = context.cef_context.next_window_event_id();
@@ -1502,7 +1559,10 @@ impl<T: UserEvent> WindowDispatch<T> for CefWindowDispatcher<T> {
 
   fn window_handle(
     &self,
-  ) -> std::result::Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+  ) -> std::result::Result<
+    raw_window_handle::WindowHandle<'_>,
+    raw_window_handle::HandleError,
+  > {
     let (tx, rx) = channel();
     self
       .context
@@ -1522,7 +1582,10 @@ impl<T: UserEvent> WindowDispatch<T> for CefWindowDispatcher<T> {
     })
   }
 
-  fn request_user_attention(&self, request_type: Option<UserAttentionType>) -> Result<()> {
+  fn request_user_attention(
+    &self,
+    request_type: Option<UserAttentionType>,
+  ) -> Result<()> {
     self.context.post_message(Message::Window {
       window_id: self.window_id,
       message: WindowMessage::RequestUserAttention(request_type),
@@ -1663,10 +1726,15 @@ impl<T: UserEvent> WindowDispatch<T> for CefWindowDispatcher<T> {
     })
   }
 
-  fn set_visible_on_all_workspaces(&self, visible_on_all_workspaces: bool) -> Result<()> {
+  fn set_visible_on_all_workspaces(
+    &self,
+    visible_on_all_workspaces: bool,
+  ) -> Result<()> {
     self.context.post_message(Message::Window {
       window_id: self.window_id,
-      message: WindowMessage::SetVisibleOnAllWorkspaces(visible_on_all_workspaces),
+      message: WindowMessage::SetVisibleOnAllWorkspaces(
+        visible_on_all_workspaces,
+      ),
     })
   }
 
@@ -1769,7 +1837,10 @@ impl<T: UserEvent> WindowDispatch<T> for CefWindowDispatcher<T> {
     })
   }
 
-  fn set_cursor_position<Pos: Into<Position>>(&self, position: Pos) -> Result<()> {
+  fn set_cursor_position<Pos: Into<Position>>(
+    &self,
+    position: Pos,
+  ) -> Result<()> {
     self.context.post_message(Message::Window {
       window_id: self.window_id,
       message: WindowMessage::SetCursorPosition(position.into()),
@@ -1790,7 +1861,10 @@ impl<T: UserEvent> WindowDispatch<T> for CefWindowDispatcher<T> {
     })
   }
 
-  fn start_resize_dragging(&self, direction: tauri_runtime::ResizeDirection) -> Result<()> {
+  fn start_resize_dragging(
+    &self,
+    direction: tauri_runtime::ResizeDirection,
+  ) -> Result<()> {
     self.context.post_message(Message::Window {
       window_id: self.window_id,
       message: WindowMessage::StartResizeDragging(direction),
@@ -1804,7 +1878,11 @@ impl<T: UserEvent> WindowDispatch<T> for CefWindowDispatcher<T> {
     })
   }
 
-  fn set_badge_count(&self, count: Option<i64>, desktop_filename: Option<String>) -> Result<()> {
+  fn set_badge_count(
+    &self,
+    count: Option<i64>,
+    desktop_filename: Option<String>,
+  ) -> Result<()> {
     self.context.post_message(Message::Window {
       window_id: self.window_id,
       message: WindowMessage::SetBadgeCount(count, desktop_filename),
@@ -1825,7 +1903,10 @@ impl<T: UserEvent> WindowDispatch<T> for CefWindowDispatcher<T> {
     })
   }
 
-  fn set_title_bar_style(&self, style: tauri_utils::TitleBarStyle) -> Result<()> {
+  fn set_title_bar_style(
+    &self,
+    style: tauri_utils::TitleBarStyle,
+  ) -> Result<()> {
     self.context.post_message(Message::Window {
       window_id: self.window_id,
       message: WindowMessage::SetTitleBarStyle(style),
@@ -1871,7 +1952,10 @@ impl<T: UserEvent> WindowDispatch<T> for CefWindowDispatcher<T> {
     window_getter!(self, WindowMessage::IsAlwaysOnTop)?
   }
 
-  fn set_background_color(&self, color: Option<tauri_utils::config::Color>) -> Result<()> {
+  fn set_background_color(
+    &self,
+    color: Option<tauri_utils::config::Color>,
+  ) -> Result<()> {
     self.context.post_message(Message::Window {
       window_id: self.window_id,
       message: WindowMessage::SetBackgroundColor(color),
@@ -1951,16 +2035,20 @@ impl<T: UserEvent> CefRuntime<T> {
       #[cfg(not(feature = "sandbox"))]
       let sandbox = ();
 
-      let loader =
-        cef::library_loader::LibraryLoader::new(&std::env::current_exe().unwrap(), is_helper);
+      let loader = cef::library_loader::LibraryLoader::new(
+        &std::env::current_exe().unwrap(),
+        is_helper,
+      );
       assert!(loader.load());
 
       if !is_helper {
         let event_tx_ = event_tx.clone();
         init_ns_app(Box::new(move |event| match event {
           AppDelegateEvent::ShouldTerminate { tx } => {
-            tx.send(objc2_app_kit::NSApplicationTerminateReply::TerminateCancel)
-              .unwrap();
+            tx.send(
+              objc2_app_kit::NSApplicationTerminateReply::TerminateCancel,
+            )
+            .unwrap();
             event_tx_.send(RunEvent::Exit).unwrap();
           }
           AppDelegateEvent::OpenURLs { urls } => {
@@ -1997,8 +2085,12 @@ impl<T: UserEvent> CefRuntime<T> {
     let mut deep_link_schemes = Vec::new();
     for arg in runtime_args.platform_specific_attributes {
       match arg {
-        RuntimeInitAttribute::CommandLineArgs { args } => command_line_args.extend(args),
-        RuntimeInitAttribute::DeepLinkSchemes { schemes } => deep_link_schemes.extend(schemes),
+        RuntimeInitAttribute::CommandLineArgs { args } => {
+          command_line_args.extend(args)
+        }
+        RuntimeInitAttribute::DeepLinkSchemes { schemes } => {
+          deep_link_schemes.extend(schemes)
+        }
       }
     }
     command_line_args.push(("--enable-media-stream".to_string(), None));
@@ -2045,7 +2137,8 @@ impl<T: UserEvent> CefRuntime<T> {
 
     let main_thread_id = thread::current().id();
     let context = RuntimeContext {
-      main_thread_task_runner: cef::task_runner_get_for_current_thread().expect("null task runner"),
+      main_thread_task_runner: cef::task_runner_get_for_current_thread()
+        .expect("null task runner"),
       main_thread_id,
       cef_context,
     };
@@ -2071,7 +2164,10 @@ pub fn run_cef_helper_process() {
 
   #[cfg(target_os = "macos")]
   let _loader = {
-    let loader = cef::library_loader::LibraryLoader::new(&std::env::current_exe().unwrap(), true);
+    let loader = cef::library_loader::LibraryLoader::new(
+      &std::env::current_exe().unwrap(),
+      true,
+    );
     assert!(loader.load());
     loader
   };
@@ -2107,11 +2203,13 @@ impl InitAttribute for RuntimeInitAttribute {
         List(Vec<tauri_utils::config::DeepLinkProtocol>),
       }
 
-      let protocols: DesktopDeepLinks =
-        serde_json::from_value(plugin_config).map_err(tauri_runtime::Error::Json)?;
+      let protocols: DesktopDeepLinks = serde_json::from_value(plugin_config)
+        .map_err(tauri_runtime::Error::Json)?;
       let schemes = match protocols {
         DesktopDeepLinks::One(p) => p.schemes,
-        DesktopDeepLinks::List(p) => p.into_iter().flat_map(|p| p.schemes).collect(),
+        DesktopDeepLinks::List(p) => {
+          p.into_iter().flat_map(|p| p.schemes).collect()
+        }
       };
 
       attrs.push(RuntimeInitAttribute::DeepLinkSchemes { schemes });
@@ -2158,7 +2256,9 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
   }
 
   #[cfg(any(windows, target_os = "linux"))]
-  fn new_any_thread(args: RuntimeInitArgs<RuntimeInitAttribute>) -> Result<Self> {
+  fn new_any_thread(
+    args: RuntimeInitArgs<RuntimeInitAttribute>,
+  ) -> Result<Self> {
     Ok(Self::init(args))
   }
 
@@ -2267,7 +2367,11 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
   fn set_theme(&self, _theme: Option<Theme>) {}
 
   #[cfg(target_os = "macos")]
-  fn set_activation_policy(&mut self, _activation_policy: tauri_runtime::ActivationPolicy) {}
+  fn set_activation_policy(
+    &mut self,
+    _activation_policy: tauri_runtime::ActivationPolicy,
+  ) {
+  }
 
   #[cfg(target_os = "macos")]
   fn set_dock_visibility(&mut self, _visible: bool) {}
@@ -2356,7 +2460,10 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
 
 #[cfg(target_os = "macos")]
 fn init_ns_app(on_event: Box<dyn Fn(AppDelegateEvent)>) {
-  use objc2::{ClassType, MainThreadMarker, msg_send, rc::Retained, runtime::NSObjectProtocol};
+  use objc2::{
+    ClassType, MainThreadMarker, msg_send, rc::Retained,
+    runtime::NSObjectProtocol,
+  };
   use objc2_app_kit::{NSApp, NSApplication};
 
   use application::{AppDelegate, SimpleApplication};
@@ -2369,7 +2476,8 @@ fn init_ns_app(on_event: Box<dyn Fn(AppDelegateEvent)>) {
 
     use objc2::runtime::ProtocolObject;
 
-    let app: Retained<NSApplication> = msg_send![SimpleApplication::class(), sharedApplication];
+    let app: Retained<NSApplication> =
+      msg_send![SimpleApplication::class(), sharedApplication];
     let delegate = AppDelegate::new(mtm, on_event);
     let proto_delegate = ProtocolObject::from_ref(&*delegate);
     app.setDelegate(Some(proto_delegate));
@@ -2385,13 +2493,17 @@ fn init_ns_app(on_event: Box<dyn Fn(AppDelegateEvent)>) {
 mod application {
   use std::{cell::Cell, sync::mpsc::channel};
 
-  use cef::application_mac::{CefAppProtocol, CrAppControlProtocol, CrAppProtocol};
+  use cef::application_mac::{
+    CefAppProtocol, CrAppControlProtocol, CrAppProtocol,
+  };
   use objc2::{
     DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
     rc::Retained,
     runtime::{Bool, NSObject, NSObjectProtocol},
   };
-  use objc2_app_kit::{NSApplication, NSApplicationDelegate, NSApplicationTerminateReply};
+  use objc2_app_kit::{
+    NSApplication, NSApplicationDelegate, NSApplicationTerminateReply,
+  };
   use objc2_foundation::{NSArray, NSURL};
 
   pub enum AppDelegateEvent {
@@ -2419,7 +2531,11 @@ mod application {
     #[allow(non_snake_case)]
     unsafe impl NSApplicationDelegate for AppDelegate {
       #[unsafe(method(application:openURLs:))]
-      unsafe fn application_openURLs(&self, _application: &NSApplication, urls: &NSArray<NSURL>) {
+      unsafe fn application_openURLs(
+        &self,
+        _application: &NSApplication,
+        urls: &NSArray<NSURL>,
+      ) {
         let converted_urls: Vec<url::Url> = urls
           .iter()
           .filter_map(|ns_url| unsafe {
@@ -2450,9 +2566,14 @@ mod application {
   );
 
   impl AppDelegate {
-    pub fn new(mtm: MainThreadMarker, on_event: Box<dyn Fn(AppDelegateEvent)>) -> Retained<Self> {
-      let delegate = Self::alloc(mtm).set_ivars(CefAppDelegateIvars { on_event });
-      let delegate: Retained<Self> = unsafe { msg_send![super(delegate), init] };
+    pub fn new(
+      mtm: MainThreadMarker,
+      on_event: Box<dyn Fn(AppDelegateEvent)>,
+    ) -> Retained<Self> {
+      let delegate =
+        Self::alloc(mtm).set_ivars(CefAppDelegateIvars { on_event });
+      let delegate: Retained<Self> =
+        unsafe { msg_send![super(delegate), init] };
       delegate
     }
   }
