@@ -936,8 +936,11 @@ wrap_life_span_handler! {
       _no_javascript_access: Option<&mut i32>,
     ) -> std::os::raw::c_int {
       let Some(handler) = &self.new_window_handler else {
-        // No handler, allow default behavior
-        return 0;
+        // No handler, deny default popup/new-window behavior. Tauri apps
+        // should opt in to additional CEF windows explicitly via
+        // WebviewBuilder::on_new_window; otherwise auth and external links
+        // must go through the app's opener/external-browser flow.
+        return 1;
       };
 
       let Some(target_url) = target_url else {
