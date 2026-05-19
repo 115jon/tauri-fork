@@ -312,15 +312,14 @@ wrap_app! {
     ) {
       if let Some(command_line) = command_line {
         for (arg, value) in &self.command_line_args {
+          let switch_name = arg.trim_start_matches('-');
           if let Some(value) = value {
             command_line.append_switch_with_value(
-              Some(&CefString::from(arg.as_str())),
+              Some(&CefString::from(switch_name)),
               Some(&CefString::from(value.as_str())),
             );
-          } else if arg.starts_with("-") {
-            command_line.append_switch(Some(&CefString::from(arg.as_str())));
           } else {
-            command_line.append_argument(Some(&CefString::from(arg.as_str())));
+            command_line.append_switch(Some(&CefString::from(switch_name)));
           }
         }
       }
@@ -698,15 +697,18 @@ wrap_permission_handler! {
   impl PermissionHandler {
     fn on_request_media_access_permission(
       &self,
-      _browser: Option<&mut Browser>,
+      browser: Option<&mut Browser>,
       _frame: Option<&mut Frame>,
-      _requesting_origin: Option<&CefString>,
+      requesting_origin: Option<&CefString>,
       requested_permissions: u32,
       callback: Option<&mut MediaAccessCallback>,
     ) -> ::std::os::raw::c_int {
       let Some(callback) = callback else {
         return 0;
       };
+      eprintln!(
+        "[CEF Permissions] media access requested: permissions={requested_permissions}"
+      );
       // Allow browser-mediated microphone, camera, and display capture prompts.
       let allowed = requested_permissions & (
         sys::cef_media_access_permission_types_t::CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE as u32
@@ -715,6 +717,10 @@ wrap_permission_handler! {
           | sys::cef_media_access_permission_types_t::CEF_MEDIA_PERMISSION_DESKTOP_AUDIO_CAPTURE as u32
       );
       if allowed != 0 {
+        persist_media_content_settings(browser, requesting_origin, requested_permissions);
+        eprintln!(
+          "[CEF Permissions] granting media access: permissions={requested_permissions}"
+        );
         callback.cont(requested_permissions);
         return 1;
       }
@@ -723,21 +729,72 @@ wrap_permission_handler! {
 
     fn on_show_permission_prompt(
       &self,
-      _browser: Option<&mut Browser>,
+      browser: Option<&mut Browser>,
       _prompt_id: u64,
-      _requesting_origin: Option<&CefString>,
+      requesting_origin: Option<&CefString>,
       requested_permissions: u32,
       callback: Option<&mut PermissionPromptCallback>,
     ) -> ::std::os::raw::c_int {
       let Some(callback) = callback else {
         return 0;
       };
+      eprintln!(
+        "[CEF Permissions] permission prompt accepted: permissions={requested_permissions}"
+      );
+      persist_media_content_settings(browser, requesting_origin, requested_permissions);
       // Allow permission prompt (e.g. microphone/camera)
       callback.cont(PermissionRequestResult::from(
         cef::sys::cef_permission_request_result_t::CEF_PERMISSION_RESULT_ACCEPT,
       ));
       1
     }
+  }
+}
+
+fn persist_media_content_settings(
+  browser: Option<&mut Browser>,
+  requesting_origin: Option<&CefString>,
+  requested_permissions: u32,
+) {
+  let Some(browser) = browser else {
+    return;
+  };
+  let Some(host) = browser.host() else {
+    return;
+  };
+  let Some(request_context) = host.request_context() else {
+    return;
+  };
+  let origin = requesting_origin
+    .map(|origin| origin.to_string())
+    .filter(|origin| !origin.is_empty())
+    .unwrap_or_else(|| "http://tauri.localhost".to_string());
+  let origin = CefString::from(origin.as_str());
+
+  if requested_permissions
+    & sys::cef_media_access_permission_types_t::CEF_MEDIA_PERMISSION_DEVICE_AUDIO_CAPTURE as u32
+    != 0
+  {
+    request_context.set_content_setting(
+      Some(&origin),
+      Some(&origin),
+      ContentSettingTypes::MEDIASTREAM_MIC,
+      ContentSettingValues::ALLOW,
+    );
+    eprintln!("[CEF Permissions] persisted microphone permission for origin");
+  }
+
+  if requested_permissions
+    & sys::cef_media_access_permission_types_t::CEF_MEDIA_PERMISSION_DEVICE_VIDEO_CAPTURE as u32
+    != 0
+  {
+    request_context.set_content_setting(
+      Some(&origin),
+      Some(&origin),
+      ContentSettingTypes::MEDIASTREAM_CAMERA,
+      ContentSettingValues::ALLOW,
+    );
+    eprintln!("[CEF Permissions] persisted camera permission for origin");
   }
 }
 

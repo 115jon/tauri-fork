@@ -2093,8 +2093,6 @@ impl<T: UserEvent> CefRuntime<T> {
         }
       }
     }
-    command_line_args.push(("--enable-media-stream".to_string(), None));
-
     let mut app = cef_impl::TauriApp::new(
       cef_context.clone(),
       runtime_args.custom_schemes,
