@@ -514,10 +514,11 @@ wrap_context_menu_handler! {
       _params: Option<&mut ContextMenuParams>,
       model: Option<&mut MenuModel>,
     ) {
-      if !self.devtools_enabled
-        && let Some(model) = model {
-          model.remove_at(model.count() - 1);
+      if let Some(model) = model {
+        while model.count() > 0 {
+          model.remove_at(0);
         }
+      }
     }
   }
 }
