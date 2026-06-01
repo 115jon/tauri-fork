@@ -307,9 +307,31 @@ wrap_app! {
 
     fn on_before_command_line_processing(
       &self,
-      _process_type: Option<&CefString>,
+      process_type: Option<&CefString>,
       command_line: Option<&mut CommandLine>,
     ) {
+      // CEF calls this for EVERY process it launches: the main browser process
+      // (process_type is an EMPTY string) and each subprocess (process_type =
+      // "gpu-process", "renderer", "utility", …). Our custom switches —
+      // --enable-features, the WebRTC/MF H.264 encoding flags, --disable-*, etc.
+      // — are browser-process configuration. Appending them onto the GPU process
+      // command line made the GPU process fail a startup CHECK and exit with
+      // STATUS_BREAKPOINT (0x80000003: "GPU process exited unexpectedly" +
+      // "Failed to create shared context for virtualization"), so hardware GPU
+      // rendering never came up. The browser process already propagates the
+      // relevant feature state to its children, so only apply our args to the
+      // browser process and leave the subprocess command lines exactly as CEF
+      // built them.
+      //
+      // NOTE: the binding maps a NULL process_type to `None` but an EMPTY
+      // string (what CEF passes for the browser process) to `Some("")`, so we
+      // must test emptiness — not `is_some()` — to identify the browser process.
+      let is_subprocess = process_type
+        .map(|pt| !pt.to_string().is_empty())
+        .unwrap_or(false);
+      if is_subprocess {
+        return;
+      }
       if let Some(command_line) = command_line {
         for (arg, value) in &self.command_line_args {
           let switch_name = arg.trim_start_matches('-');
