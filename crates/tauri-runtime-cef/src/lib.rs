@@ -2121,6 +2121,15 @@ impl<T: UserEvent> CefRuntime<T> {
     let settings = cef::Settings {
       no_sandbox: !cfg!(feature = "sandbox") as i32,
       cache_path: cache_path.to_string_lossy().to_string().as_str().into(),
+      // ── Multi-threaded message loop ────────────────────────────────────────
+      // By default this runtime calls cef::do_message_loop_work() in a tight
+      // loop (no sleep), which burns an entire CPU core at idle. Setting
+      // multi_threaded_message_loop=1 moves CEF's message pump to a dedicated
+      // background thread (same pattern used by Electron on Windows), freeing
+      // the main thread to block on std::sync::mpsc::Receiver::recv() instead
+      // of spinning with try_recv(). This is safe for windowed (non-OSR) mode.
+      #[cfg(windows)]
+      multi_threaded_message_loop: 1,
       ..Default::default()
     };
     assert_eq!(
@@ -2427,21 +2436,47 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
     );
 
     'main_loop: loop {
-      while let Ok(event) = self.event_rx.try_recv() {
+      // On Windows with multi_threaded_message_loop=1, CEF drives its own
+      // message pump on a background thread. The main thread only needs to
+      // forward Tauri events — block here to avoid a CPU-burning spin.
+      // On other platforms (macOS, Linux) where multi_threaded_message_loop
+      // is not set, we must call do_message_loop_work() ourselves.
+      #[cfg(windows)]
+      let event = match self.event_rx.recv() {
+        Ok(e) => e,
+        Err(_) => break 'main_loop, // sender dropped → exit
+      };
+
+      #[cfg(windows)]
+      {
         if matches!(&event, RunEvent::Exit) {
-          // Exit event is triggered when we break out of the loop
           break 'main_loop;
         }
-
         (self.context.cef_context.callback.borrow())(event);
+
+        // Drain any additional queued events without blocking
+        while let Ok(ev) = self.event_rx.try_recv() {
+          if matches!(&ev, RunEvent::Exit) {
+            break 'main_loop;
+          }
+          (self.context.cef_context.callback.borrow())(ev);
+        }
+        (self.context.cef_context.callback.borrow())(RunEvent::MainEventsCleared);
       }
 
-      // Do CEF message loop work
-      // This processes one iteration of the message loop
-      cef::do_message_loop_work();
-
-      // Emit MainEventsCleared event
-      (self.context.cef_context.callback.borrow())(RunEvent::MainEventsCleared);
+      #[cfg(not(windows))]
+      {
+        // Non-Windows: drain the channel then drive the CEF message pump
+        while let Ok(event) = self.event_rx.try_recv() {
+          if matches!(&event, RunEvent::Exit) {
+            break 'main_loop;
+          }
+          (self.context.cef_context.callback.borrow())(event);
+        }
+        // Do CEF message loop work — required when NOT using multi_threaded_message_loop
+        cef::do_message_loop_work();
+        (self.context.cef_context.callback.borrow())(RunEvent::MainEventsCleared);
+      }
     }
 
     cef::shutdown();
