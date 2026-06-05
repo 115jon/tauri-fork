@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::{
   collections::HashMap,
   sync::{
-    Arc, Mutex,
+    Arc, Condvar, Mutex,
     atomic::{AtomicBool, AtomicU32, Ordering},
     mpsc::channel,
   },
@@ -295,6 +295,7 @@ wrap_app! {
     custom_schemes: Vec<String>,
     deep_link_schemes: Vec<String>,
     command_line_args: Vec<(String, Option<String>)>,
+    pump_scheduler: std::sync::Arc<(std::sync::Mutex<i64>, Condvar)>,
   }
 
   impl App {
@@ -302,6 +303,7 @@ wrap_app! {
       Some(AppBrowserProcessHandler::new(
         self.context.clone(),
         self.deep_link_schemes.clone(),
+        self.pump_scheduler.clone(),
       ))
     }
 
@@ -353,6 +355,7 @@ wrap_browser_process_handler! {
   struct AppBrowserProcessHandler<T: UserEvent> {
     context: Context<T>,
     deep_link_schemes: Vec<String>,
+    pump_scheduler: Arc<(Mutex<i64>, Condvar)>,
   }
 
   impl BrowserProcessHandler {
@@ -383,6 +386,14 @@ wrap_browser_process_handler! {
         }
       // TODO: add event
       1
+    }
+
+    // Called by CEF when external_message_pump=1. Signals the main loop's
+    // condvar so do_message_loop_work() is called at the right moment.
+    fn on_schedule_message_pump_work(&self, delay_ms: i64) {
+      let (lock, cvar) = &*self.pump_scheduler;
+      *lock.lock().unwrap() = delay_ms;
+      cvar.notify_one();
     }
   }
 }

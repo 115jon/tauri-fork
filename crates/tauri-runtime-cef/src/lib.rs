@@ -38,11 +38,12 @@ use std::{
   fmt,
   fs::create_dir_all,
   sync::{
-    Arc, Mutex,
-    atomic::AtomicBool,
+    Arc, Condvar, Mutex,
+    atomic::{AtomicBool, AtomicI64, Ordering},
     mpsc::{Sender, channel},
   },
   thread::{self, ThreadId},
+  time::Duration,
 };
 
 #[cfg(target_os = "macos")]
@@ -1993,6 +1994,12 @@ pub struct CefRuntime<T: UserEvent> {
   pub context: RuntimeContext<T>,
   event_tx: std::sync::mpsc::Sender<RunEvent<T>>,
   event_rx: std::sync::mpsc::Receiver<RunEvent<T>>,
+  pump_scheduler: Arc<(Mutex<i64>, std::sync::Condvar)>,
+
+
+
+
+
 }
 
 #[cfg(target_os = "macos")]
@@ -2093,12 +2100,22 @@ impl<T: UserEvent> CefRuntime<T> {
         }
       }
     }
+
+    // Shared condvar for external_message_pump scheduling.
+    // AppBrowserProcessHandler::on_schedule_message_pump_work signals this;
+    // the run() loop blocks on it with the CEF-specified timeout.
+    let pump_scheduler: Arc<(Mutex<i64>, Condvar)> =
+      Arc::new((Mutex::new(-1i64), Condvar::new()));
+
+
     let mut app = cef_impl::TauriApp::new(
       cef_context.clone(),
       runtime_args.custom_schemes,
       deep_link_schemes,
       command_line_args,
+      pump_scheduler.clone(),
     );
+
 
     let cmd = args.as_cmd_line().unwrap();
     let switch = CefString::from("type");
@@ -2121,15 +2138,16 @@ impl<T: UserEvent> CefRuntime<T> {
     let settings = cef::Settings {
       no_sandbox: !cfg!(feature = "sandbox") as i32,
       cache_path: cache_path.to_string_lossy().to_string().as_str().into(),
-      // ── Multi-threaded message loop ────────────────────────────────────────
-      // By default this runtime calls cef::do_message_loop_work() in a tight
-      // loop (no sleep), which burns an entire CPU core at idle. Setting
-      // multi_threaded_message_loop=1 moves CEF's message pump to a dedicated
-      // background thread (same pattern used by Electron on Windows), freeing
-      // the main thread to block on std::sync::mpsc::Receiver::recv() instead
-      // of spinning with try_recv(). This is safe for windowed (non-OSR) mode.
+      // ── External message pump ──────────────────────────────────────────────
+      // CEF's default mode requires the host to call do_message_loop_work()
+      // in a tight spin, burning a full CPU core at idle.
+      // external_message_pump=1 fixes this: CEF calls
+      // BrowserProcessHandler::on_schedule_message_pump_work(delay_ms)
+      // to tell us exactly when work is needed. The main thread blocks on a
+      // Condvar with that timeout and wakes only when work is ready.
+      // This is safe for windowed (non-OSR) CEF on all platforms.
       #[cfg(windows)]
-      multi_threaded_message_loop: 1,
+      external_message_pump: 1,
       ..Default::default()
     };
     assert_eq!(
@@ -2153,7 +2171,9 @@ impl<T: UserEvent> CefRuntime<T> {
       context,
       event_tx,
       event_rx,
+      pump_scheduler,
     }
+
   }
 }
 
@@ -2436,44 +2456,57 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
     );
 
     'main_loop: loop {
-      // On Windows with multi_threaded_message_loop=1, CEF drives its own
-      // message pump on a background thread. The main thread only needs to
-      // forward Tauri events — block here to avoid a CPU-burning spin.
-      // On other platforms (macOS, Linux) where multi_threaded_message_loop
-      // is not set, we must call do_message_loop_work() ourselves.
-      #[cfg(windows)]
-      let event = match self.event_rx.recv() {
-        Ok(e) => e,
-        Err(_) => break 'main_loop, // sender dropped → exit
-      };
-
+      // ---- Windows: condvar-driven external message pump -----------------
+      // With external_message_pump=1, CEF calls on_schedule_message_pump_work
+      // (delay_ms) to tell us when do_message_loop_work() is needed. We block
+      // on a Condvar with that timeout so the main thread sleeps instead of
+      // spinning. This replaces the original tight loop that burned a full CPU
+      // core at idle.
       #[cfg(windows)]
       {
-        if matches!(&event, RunEvent::Exit) {
-          break 'main_loop;
-        }
-        (self.context.cef_context.callback.borrow())(event);
-
-        // Drain any additional queued events without blocking
-        while let Ok(ev) = self.event_rx.try_recv() {
-          if matches!(&ev, RunEvent::Exit) {
-            break 'main_loop;
+        // Drain any Tauri events that arrived while we were sleeping
+        loop {
+          match self.event_rx.try_recv() {
+            Ok(ev) if matches!(&ev, RunEvent::Exit) => break 'main_loop,
+            Ok(ev) => (self.context.cef_context.callback.borrow())(ev),
+            Err(_) => break,
           }
-          (self.context.cef_context.callback.borrow())(ev);
+        }
+
+        // Block until CEF signals work is needed (or the delay expires).
+        // On initial startup delay_ms will be -1 (no pending work); we cap
+        // the max wait at 50ms so Tauri events stay responsive.
+        {
+          let (lock, cvar) = &*self.pump_scheduler;
+          let guard = lock.lock().unwrap();
+          let delay_ms = *guard;
+          let wait_ms: u64 = if delay_ms < 0 { 50 } else { delay_ms.max(0) as u64 };
+          let _ = cvar.wait_timeout(guard, Duration::from_millis(wait_ms));
+        }
+
+        // Do CEF message loop work
+        cef::do_message_loop_work();
+
+        // Drain events again after the work tick
+        loop {
+          match self.event_rx.try_recv() {
+            Ok(ev) if matches!(&ev, RunEvent::Exit) => break 'main_loop,
+            Ok(ev) => (self.context.cef_context.callback.borrow())(ev),
+            Err(_) => break,
+          }
         }
         (self.context.cef_context.callback.borrow())(RunEvent::MainEventsCleared);
       }
 
+      // ---- Non-Windows: original spin-based pump --------------------------
       #[cfg(not(windows))]
       {
-        // Non-Windows: drain the channel then drive the CEF message pump
         while let Ok(event) = self.event_rx.try_recv() {
           if matches!(&event, RunEvent::Exit) {
             break 'main_loop;
           }
           (self.context.cef_context.callback.borrow())(event);
         }
-        // Do CEF message loop work — required when NOT using multi_threaded_message_loop
         cef::do_message_loop_work();
         (self.context.cef_context.callback.borrow())(RunEvent::MainEventsCleared);
       }
