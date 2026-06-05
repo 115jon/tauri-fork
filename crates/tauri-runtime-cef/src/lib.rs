@@ -38,8 +38,8 @@ use std::{
   fmt,
   fs::create_dir_all,
   sync::{
-    Arc, Condvar, Mutex,
-    atomic::{AtomicBool, AtomicI64, Ordering},
+    Arc, Mutex,
+    atomic::AtomicBool,
     mpsc::{Sender, channel},
   },
   thread::{self, ThreadId},
@@ -1994,12 +1994,6 @@ pub struct CefRuntime<T: UserEvent> {
   pub context: RuntimeContext<T>,
   event_tx: std::sync::mpsc::Sender<RunEvent<T>>,
   event_rx: std::sync::mpsc::Receiver<RunEvent<T>>,
-  pump_scheduler: Arc<(Mutex<i64>, std::sync::Condvar)>,
-
-
-
-
-
 }
 
 #[cfg(target_os = "macos")]
@@ -2100,22 +2094,12 @@ impl<T: UserEvent> CefRuntime<T> {
         }
       }
     }
-
-    // Shared condvar for external_message_pump scheduling.
-    // AppBrowserProcessHandler::on_schedule_message_pump_work signals this;
-    // the run() loop blocks on it with the CEF-specified timeout.
-    let pump_scheduler: Arc<(Mutex<i64>, Condvar)> =
-      Arc::new((Mutex::new(-1i64), Condvar::new()));
-
-
     let mut app = cef_impl::TauriApp::new(
       cef_context.clone(),
       runtime_args.custom_schemes,
       deep_link_schemes,
       command_line_args,
-      pump_scheduler.clone(),
     );
-
 
     let cmd = args.as_cmd_line().unwrap();
     let switch = CefString::from("type");
@@ -2138,16 +2122,6 @@ impl<T: UserEvent> CefRuntime<T> {
     let settings = cef::Settings {
       no_sandbox: !cfg!(feature = "sandbox") as i32,
       cache_path: cache_path.to_string_lossy().to_string().as_str().into(),
-      // ── External message pump ──────────────────────────────────────────────
-      // CEF's default mode requires the host to call do_message_loop_work()
-      // in a tight spin, burning a full CPU core at idle.
-      // external_message_pump=1 fixes this: CEF calls
-      // BrowserProcessHandler::on_schedule_message_pump_work(delay_ms)
-      // to tell us exactly when work is needed. The main thread blocks on a
-      // Condvar with that timeout and wakes only when work is ready.
-      // This is safe for windowed (non-OSR) CEF on all platforms.
-      #[cfg(windows)]
-      external_message_pump: 1,
       ..Default::default()
     };
     assert_eq!(
@@ -2171,9 +2145,7 @@ impl<T: UserEvent> CefRuntime<T> {
       context,
       event_tx,
       event_rx,
-      pump_scheduler,
     }
-
   }
 }
 
@@ -2456,59 +2428,30 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
     );
 
     'main_loop: loop {
-      // ---- Windows: condvar-driven external message pump -----------------
-      // With external_message_pump=1, CEF calls on_schedule_message_pump_work
-      // (delay_ms) to tell us when do_message_loop_work() is needed. We block
-      // on a Condvar with that timeout so the main thread sleeps instead of
-      // spinning. This replaces the original tight loop that burned a full CPU
-      // core at idle.
-      #[cfg(windows)]
-      {
-        // Drain any Tauri events that arrived while we were sleeping
-        loop {
-          match self.event_rx.try_recv() {
-            Ok(ev) if matches!(&ev, RunEvent::Exit) => break 'main_loop,
-            Ok(ev) => (self.context.cef_context.callback.borrow())(ev),
-            Err(_) => break,
-          }
+      // Drain all immediately-available Tauri events (non-blocking).
+      while let Ok(event) = self.event_rx.try_recv() {
+        if matches!(&event, RunEvent::Exit) {
+          break 'main_loop;
         }
-
-        // Block until CEF signals work is needed (or the delay expires).
-        // On initial startup delay_ms will be -1 (no pending work); we cap
-        // the max wait at 50ms so Tauri events stay responsive.
-        {
-          let (lock, cvar) = &*self.pump_scheduler;
-          let guard = lock.lock().unwrap();
-          let delay_ms = *guard;
-          let wait_ms: u64 = if delay_ms < 0 { 50 } else { delay_ms.max(0) as u64 };
-          let _ = cvar.wait_timeout(guard, Duration::from_millis(wait_ms));
-        }
-
-        // Do CEF message loop work
-        cef::do_message_loop_work();
-
-        // Drain events again after the work tick
-        loop {
-          match self.event_rx.try_recv() {
-            Ok(ev) if matches!(&ev, RunEvent::Exit) => break 'main_loop,
-            Ok(ev) => (self.context.cef_context.callback.borrow())(ev),
-            Err(_) => break,
-          }
-        }
-        (self.context.cef_context.callback.borrow())(RunEvent::MainEventsCleared);
+        (self.context.cef_context.callback.borrow())(event);
       }
 
-      // ---- Non-Windows: original spin-based pump --------------------------
-      #[cfg(not(windows))]
-      {
-        while let Ok(event) = self.event_rx.try_recv() {
-          if matches!(&event, RunEvent::Exit) {
-            break 'main_loop;
-          }
-          (self.context.cef_context.callback.borrow())(event);
-        }
-        cef::do_message_loop_work();
-        (self.context.cef_context.callback.borrow())(RunEvent::MainEventsCleared);
+      // Drive the CEF + Win32 message pump.
+      // do_message_loop_work() calls PeekMessage/DispatchMessage internally
+      // and must be called frequently to keep CEF windows responsive.
+      cef::do_message_loop_work();
+
+      (self.context.cef_context.callback.borrow())(RunEvent::MainEventsCleared);
+
+      // Yield to OS for up to 1ms, waking immediately on any Tauri event.
+      // Without this the loop spins at ~50k iter/s burning a full CPU core;
+      // with it the rate drops to ~1k iter/s (~1-2% CPU idle).
+      // 1ms is imperceptible to humans and well within CEF's scheduling budget.
+      #[cfg(windows)]
+      match self.event_rx.recv_timeout(Duration::from_millis(1)) {
+        Ok(ev) if matches!(&ev, RunEvent::Exit) => break 'main_loop,
+        Ok(ev) => (self.context.cef_context.callback.borrow())(ev),
+        Err(_) => {}
       }
     }
 
