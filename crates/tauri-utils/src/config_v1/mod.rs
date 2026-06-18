@@ -1110,8 +1110,10 @@ impl From<Csp> for HashMap<String, CspDirectiveSources> {
         for directive in policy.split(';') {
           let mut tokens = directive.trim().split(' ');
           if let Some(directive) = tokens.next() {
-            let sources = tokens.map(|s| s.to_string()).collect::<Vec<String>>();
-            map.insert(directive.to_string(), CspDirectiveSources::List(sources));
+            if !directive.is_empty() {
+              let sources = tokens.map(|s| s.to_string()).collect::<Vec<String>>();
+              map.insert(directive.to_string(), CspDirectiveSources::List(sources));
+            }
           }
         }
         map

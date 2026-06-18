@@ -31,6 +31,7 @@ fn csp_inject_initialization_scripts_hashes(
   existing_csp: String,
   initialization_scripts: &[CefInitScript],
 ) -> String {
+  eprintln!("DEBUG: existing_csp = {:?}", existing_csp);
   if initialization_scripts.is_empty() {
     return existing_csp;
   }
@@ -59,7 +60,9 @@ fn csp_inject_initialization_scripts_hashes(
   script_src.extend(script_hashes);
 
   // Convert back to CSP string
-  Csp::DirectiveMap(csp_map).to_string()
+  let new_csp = Csp::DirectiveMap(csp_map).to_string();
+  eprintln!("DEBUG: new_csp = {:?}", new_csp);
+  new_csp
 }
 
 /// Helper function to inject initialization scripts into HTML body
