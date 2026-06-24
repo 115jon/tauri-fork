@@ -3388,10 +3388,20 @@ fn create_browser_window<T: UserEvent>(
     bounds.y = position.y;
   }
 
-  let window_info = cef::WindowInfo {
+  let mut window_info = cef::WindowInfo {
     bounds,
     ..Default::default()
   };
+
+  #[cfg(target_os = "windows")]
+  {
+    // Default styles: WS_OVERLAPPEDWINDOW (0x00CF0000) | WS_CLIPCHILDREN (0x02000000) | WS_CLIPSIBLINGS (0x04000000)
+    let mut style = 0x00CF0000 | 0x02000000 | 0x04000000;
+    if attributes.borrow().visible.unwrap_or(true) {
+      style |= 0x10000000; // WS_VISIBLE
+    }
+    window_info.style = style;
+  }
 
   let Some(browser) = browser_host_create_browser_sync(
     Some(&window_info),
