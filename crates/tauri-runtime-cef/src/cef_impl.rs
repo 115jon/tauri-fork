@@ -1398,12 +1398,16 @@ wrap_window_delegate! {
 
         if let Some(maximized) = a.maximized
           && maximized {
-            window.maximize();
+            if a.visible.unwrap_or(true) {
+              window.maximize();
+            }
           }
 
         if let Some(fullscreen) = a.fullscreen
           && fullscreen {
-            window.set_fullscreen(1);
+            if a.visible.unwrap_or(true) {
+              window.set_fullscreen(1);
+            }
           }
 
         if let Some(always_on_top) = a.always_on_top
