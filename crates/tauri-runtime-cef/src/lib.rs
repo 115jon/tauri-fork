@@ -662,8 +662,8 @@ pub struct CefWindowDispatcher<T: UserEvent> {
 #[derive(Debug, Clone)]
 pub struct CefWindowBuilder {
   title: Option<String>,
-  position: Option<Position>,
-  inner_size: Option<Size>,
+  pub(crate) position: Option<Position>,
+  pub(crate) inner_size: Option<Size>,
   min_inner_size: Option<Size>,
   max_inner_size: Option<Size>,
   inner_size_constraints: Option<tauri_runtime::window::WindowSizeConstraints>,
@@ -673,10 +673,10 @@ pub struct CefWindowBuilder {
   maximizable: Option<bool>,
   minimizable: Option<bool>,
   closable: Option<bool>,
-  fullscreen: Option<bool>,
+  pub(crate) fullscreen: Option<bool>,
   focused: Option<bool>,
   focusable: Option<bool>,
-  maximized: Option<bool>,
+  pub(crate) maximized: Option<bool>,
   visible: Option<bool>,
   #[cfg(any(not(target_os = "macos"), feature = "macos-private-api"))]
   transparent: Option<bool>,

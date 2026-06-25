@@ -28,8 +28,17 @@ pub mod windows {
     let window_width = window_rect.right - window_rect.left;
     let window_height = window_rect.bottom - window_rect.top;
 
-    let width_diff = window_width - client_width;
-    let height_diff = window_height - client_height;
+    let mut width_diff = window_width - client_width;
+    let mut height_diff = window_height - client_height;
+
+    if client_width == 0 || client_height == 0 {
+      // If the window is hidden, GetClientRect might return 0.
+      // In this case, use standard default window border differences.
+      // Usually, Windows 10/11 invisible borders are 16px wide (8px each side)
+      // and height diff is around 39px (title bar + borders).
+      width_diff = 16;
+      height_diff = 39;
+    }
 
     PhysicalSize::new(
       size.width + width_diff as u32,

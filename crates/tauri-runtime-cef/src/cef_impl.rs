@@ -120,11 +120,16 @@ pub(crate) fn get_available_monitors() -> Vec<tauri_runtime::monitor::Monitor> {
   let mut displays: Vec<Option<cef::Display>> =
     vec![None; cef::display_get_count()];
   cef::display_get_alls(Some(&mut displays));
-  displays
+  let monitors: Vec<tauri_runtime::monitor::Monitor> = displays
     .into_iter()
     .flatten()
     .map(|d| display_to_monitor(&d))
-    .collect()
+    .collect();
+  println!("get_available_monitors returned: {} monitors", monitors.len());
+  for (i, m) in monitors.iter().enumerate() {
+    println!("  Monitor {}: pos=({}, {}), size=({}, {})", i, m.position.x, m.position.y, m.size.width, m.size.height);
+  }
+  monitors
 }
 
 /// Convert tauri Icon to CEF Image
@@ -1290,13 +1295,52 @@ wrap_window_delegate! {
   impl PanelDelegate {}
 
   impl WindowDelegate {
+    fn initial_show_state(&self, _window: Option<&mut Window>) -> cef::ShowState {
+      let visible = self.attributes.borrow().visible.unwrap_or(true);
+      log::info!("[CefWindow] initial_show_state visible={visible}");
+      if visible {
+        cef::ShowState::NORMAL
+      } else {
+        cef::ShowState::HIDDEN
+      }
+    }
+
+    fn initial_bounds(&self, window: Option<&mut Window>) -> cef::Rect {
+      let a = self.attributes.borrow().clone();
+      let scale = window.and_then(|w| w.display()).map(|d| d.device_scale_factor() as f64).unwrap_or(1.0);
+      let mut rect = cef::Rect { x: 0, y: 0, width: 0, height: 0 };
+      
+      if let Some(pos) = &a.position {
+        let logical_pos = pos.to_logical::<i32>(scale);
+        rect.x = logical_pos.x;
+        rect.y = logical_pos.y;
+      }
+      
+      if let Some(size) = &a.inner_size {
+        #[cfg(windows)]
+        let inner_size: tauri_runtime::dpi::Size = {
+            // we don't have window handle yet, so this might not be fully accurate, but better than 0,0
+            size.to_physical::<u32>(scale).into()
+        };
+        #[cfg(not(windows))]
+        let inner_size = size.clone();
+        
+        let logical_size = inner_size.to_logical::<i32>(scale);
+        rect.width = logical_size.width;
+        rect.height = logical_size.height;
+      }
+      
+      log::info!("[CefWindow] initial_bounds returning: {:?}", rect);
+      rect
+    }
+
     fn on_window_created(&self, window: Option<&mut Window>) {
       if let Some(window) = window {
         // Setup necessary handling for `start_window_dragging` to work on Windows
         #[cfg(windows)]
         drag_window::windows::subclass_window_for_dragging(window);
 
-        let a = self.attributes.borrow();
+        let a = self.attributes.borrow().clone();
         if let Some(icon) = a.icon.clone() {
           set_window_icon(window, icon);
         }
@@ -1312,10 +1356,8 @@ wrap_window_delegate! {
           window.set_title(Some(&CefString::from(title.as_str())));
         }
 
-        if let Some(inner_size) = a.inner_size
-
-          && let Some(display) = window.display() {
-            let scale = display.device_scale_factor() as f64;
+        if let Some(inner_size) = a.inner_size {
+            let scale = window.display().map(|d| d.device_scale_factor() as f64).unwrap_or(1.0);
 
             // On Windows, the size set via CEF APIs is the outer size (including borders),
             // so we need to adjust it to set the correct inner size.
@@ -1324,19 +1366,20 @@ wrap_window_delegate! {
               let size = inner_size.to_physical::<u32>(scale);
               crate::utils::windows::adjust_size(window.window_handle(), size).into()
             };
-
+            
             let logical_size = inner_size.to_logical::<f32>(scale);
 
+            log::info!("[CefWindow] on_window_created setting size to w: {}, h: {}", logical_size.width, logical_size.height);
             window.set_size(Some(&cef::Size {
               width: logical_size.width as i32,
               height: logical_size.height as i32,
             }));
           }
 
-        if let Some(position) = &a.position
-          && let Some(display) = window.display() {
-            let device_scale_factor = display.device_scale_factor() as f64;
+        if let Some(position) = &a.position {
+            let device_scale_factor = window.display().map(|d| d.device_scale_factor() as f64).unwrap_or(1.0);
             let logical_position = position.to_logical::<i32>(device_scale_factor);
+            log::info!("[CefWindow] on_window_created setting position to x: {}, y: {}", logical_position.x, logical_position.y);
             window.set_position(Some(&cef::Point {
               x: logical_position.x,
               y: logical_position.y,
@@ -1409,7 +1452,11 @@ wrap_window_delegate! {
         }
 
         if a.visible.unwrap_or(true) {
+          log::info!("[CefWindow] on_window_created -> show");
           window.show();
+        } else {
+          log::info!("[CefWindow] on_window_created -> hide");
+          window.hide();
         }
 
         // Set traffic light position on macOS after window is fully created
@@ -1455,7 +1502,7 @@ wrap_window_delegate! {
 
     fn can_maximize(&self, _window: Option<&mut Window>) -> ::std::os::raw::c_int {
       // Can maximize if maximizable is true and resizable is true (or not set, defaulting to true)
-      let a = self.attributes.borrow();
+      let a = self.attributes.borrow().clone();
       let resizable = a.resizable.unwrap_or(true);
       let maximizable = a.maximizable.unwrap_or(true);
       (resizable && maximizable) as i32
@@ -1504,6 +1551,11 @@ wrap_window_delegate! {
       bounds: Option<&cef::Rect>,
     ) {
       let (Some(window), Some(bounds)) = (window, bounds) else { return; };
+      log::info!("[CefWindow] on_window_bounds_changed: x: {}, y: {}, w: {}, h: {}", bounds.x, bounds.y, bounds.width, bounds.height);
+
+      if bounds.x <= -32000 || bounds.y <= -32000 || bounds.width == 0 || bounds.height == 0 {
+          return;
+      }
 
       #[cfg(target_os = "macos")]
       if let Some(pos) = &self.attributes.borrow().traffic_light_position {
@@ -1515,7 +1567,16 @@ wrap_window_delegate! {
 
       // On Windows, we need to get the inner size because the bounds include the window borders.
       #[cfg(windows)]
-      let size = crate::utils::windows::inner_size(window.window_handle());
+      let size = {
+          let mut s = crate::utils::windows::inner_size(window.window_handle());
+          if s.width == 0 || s.height == 0 {
+              let scale = window.display().map(|d| d.device_scale_factor() as f64).unwrap_or(1.0);
+              let physical_outer = tauri_runtime::dpi::LogicalSize::new(bounds.width as u32, bounds.height as u32).to_physical::<u32>(scale);
+              s.width = physical_outer.width.saturating_sub(16);
+              s.height = physical_outer.height.saturating_sub(39);
+          }
+          s
+      };
 
       // Update autoresize overlay bounds
       let bounds_updates: Vec<(CefWebview, cef::Rect)> =
@@ -1575,10 +1636,19 @@ wrap_window_delegate! {
         );
       }
 
-      let physical_size = LogicalSize::new(
-        bounds.width as u32,
-        bounds.height as u32,
-      ).to_physical::<u32>(scale);
+      #[cfg(windows)]
+      let physical_size = size;
+      
+      #[cfg(not(windows))]
+      let physical_size = size.to_physical::<u32>(scale);
+
+      // Cache the new valid coordinates
+      {
+        let mut attrs = self.attributes.borrow_mut();
+        attrs.position = Some(tauri_runtime::dpi::Position::Physical(physical_position));
+        attrs.inner_size = Some(tauri_runtime::dpi::Size::Physical(physical_size));
+      }
+
       let size_changed = {
         let mut emitted_size = self.last_emitted_size.borrow_mut();
         let changed = *emitted_size != physical_size;
@@ -2535,6 +2605,13 @@ fn handle_window_message<T: UserEvent>(
         .map(|w| match &w.window {
           crate::AppWindowKind::Window(window) => {
             let bounds = window.bounds();
+            let scale = window.display().map(|d| d.device_scale_factor() as f64).unwrap_or(1.0);
+            if bounds.x <= -32000 || bounds.y <= -32000 || bounds.width == 0 || bounds.height == 0 {
+              if let Some(cached_pos) = w.attributes.borrow().position.clone() {
+                return Ok(cached_pos.to_physical::<i32>(scale));
+              }
+              return Err(tauri_runtime::Error::FailedToSendMessage);
+            }
             let scale = window
               .display()
               .map(|d| d.device_scale_factor() as f64)
@@ -2559,6 +2636,13 @@ fn handle_window_message<T: UserEvent>(
         .map(|w| match &w.window {
           crate::AppWindowKind::Window(window) => {
             let bounds = window.bounds();
+            let scale = window.display().map(|d| d.device_scale_factor() as f64).unwrap_or(1.0);
+            if bounds.x <= -32000 || bounds.y <= -32000 || bounds.width == 0 || bounds.height == 0 {
+              if let Some(cached_pos) = w.attributes.borrow().position.clone() {
+                return Ok(cached_pos.to_physical::<i32>(scale));
+              }
+              return Err(tauri_runtime::Error::FailedToSendMessage);
+            }
             let scale = window
               .display()
               .map(|d| d.device_scale_factor() as f64)
@@ -2582,6 +2666,15 @@ fn handle_window_message<T: UserEvent>(
         .get(&window_id)
         .map(|w| match &w.window {
           crate::AppWindowKind::Window(window) => {
+            let bounds = window.bounds();
+            let scale = window.display().map(|d| d.device_scale_factor() as f64).unwrap_or(1.0);
+            if bounds.x <= -32000 || bounds.y <= -32000 || bounds.width == 0 || bounds.height == 0 {
+              if let Some(cached_size) = w.attributes.borrow().inner_size.clone() {
+                return Ok(cached_size.to_physical::<u32>(scale));
+              }
+              return Err(tauri_runtime::Error::FailedToSendMessage);
+            }
+            
             #[cfg(not(windows))]
             let size = {
               let scale = window
@@ -2616,6 +2709,13 @@ fn handle_window_message<T: UserEvent>(
         .map(|w| match &w.window {
           crate::AppWindowKind::Window(window) => {
             let bounds = window.bounds();
+            let scale = window.display().map(|d| d.device_scale_factor() as f64).unwrap_or(1.0);
+            if bounds.x <= -32000 || bounds.y <= -32000 || bounds.width == 0 || bounds.height == 0 {
+              if let Some(cached_size) = w.attributes.borrow().inner_size.clone() {
+                return Ok(cached_size.to_physical::<u32>(scale));
+              }
+              return Err(tauri_runtime::Error::FailedToSendMessage);
+            }
             let scale = window
               .display()
               .map(|d| d.device_scale_factor() as f64)
@@ -2639,7 +2739,11 @@ fn handle_window_message<T: UserEvent>(
         .get(&window_id)
         .map(|w| match &w.window {
           crate::AppWindowKind::Window(window) => {
-            Ok(window.is_fullscreen() == 1)
+            if window.is_visible() == 1 {
+              Ok(window.is_fullscreen() == 1)
+            } else {
+              Ok(w.attributes.borrow().fullscreen.unwrap_or(false))
+            }
           }
           crate::AppWindowKind::BrowserWindow => {
             Err(tauri_runtime::Error::FailedToSendMessage)
@@ -2671,7 +2775,11 @@ fn handle_window_message<T: UserEvent>(
         .get(&window_id)
         .map(|w| match &w.window {
           crate::AppWindowKind::Window(window) => {
-            Ok(window.is_maximized() == 1)
+            if window.is_visible() == 1 {
+              Ok(window.is_maximized() == 1)
+            } else {
+              Ok(w.attributes.borrow().maximized.unwrap_or(false))
+            }
           }
           crate::AppWindowKind::BrowserWindow => {
             Err(tauri_runtime::Error::FailedToSendMessage)
@@ -2961,17 +3069,23 @@ fn handle_window_message<T: UserEvent>(
       }
     }
     WindowMessage::Maximize => {
-      if let Some(app_window) = context.windows.borrow().get(&window_id)
-        && let Some(window) = app_window.window()
-      {
-        window.maximize();
+      if let Some(app_window) = context.windows.borrow().get(&window_id) {
+        app_window.attributes.borrow_mut().maximized = Some(true);
+        if let Some(window) = app_window.window() {
+          if window.is_visible() == 1 {
+            window.maximize();
+          }
+        }
       }
     }
     WindowMessage::Unmaximize => {
-      if let Some(app_window) = context.windows.borrow().get(&window_id)
-        && let Some(window) = app_window.window()
-      {
-        window.restore();
+      if let Some(app_window) = context.windows.borrow().get(&window_id) {
+        app_window.attributes.borrow_mut().maximized = Some(false);
+        if let Some(window) = app_window.window() {
+          if window.is_visible() == 1 {
+            window.restore();
+          }
+        }
       }
     }
     WindowMessage::Minimize => {
@@ -2992,6 +3106,80 @@ fn handle_window_message<T: UserEvent>(
       if let Some(app_window) = context.windows.borrow().get(&window_id)
         && let Some(window) = app_window.window()
       {
+        // 1. Get scale factor and cached attributes
+        let device_scale_factor = window.display().map(|d| d.device_scale_factor() as f64).unwrap_or(1.0);
+        let (cached_pos, cached_size, cached_maximized, cached_fullscreen) = {
+          let attrs = app_window.attributes.borrow();
+          (
+            attrs.position.clone(),
+            attrs.inner_size.clone(),
+            attrs.maximized,
+            attrs.fullscreen,
+          )
+        };
+
+        // 2. Apply position/size/maximized/fullscreen synchronously BEFORE showing
+        log::info!(
+          "[CefWindow] Show handler executing synchronous restore BEFORE show: pos={:?}, size={:?}, max={:?}, fs={:?}",
+          cached_pos,
+          cached_size,
+          cached_maximized,
+          cached_fullscreen
+        );
+
+        let mut is_fullscreen = false;
+        if let Some(fullscreen) = cached_fullscreen {
+          if fullscreen {
+            log::info!("[CefWindow] Show handler: applying fullscreen");
+            window.set_fullscreen(1);
+            is_fullscreen = true;
+          }
+        }
+
+        if !is_fullscreen {
+          let mut is_maximized = false;
+          if let Some(maximized) = cached_maximized {
+            if maximized {
+              log::info!("[CefWindow] Show handler: applying maximized");
+              window.maximize();
+              is_maximized = true;
+            }
+          }
+
+          if !is_maximized {
+            if let Some(cached_pos) = &cached_pos {
+              let logical_position = cached_pos.to_logical::<i32>(device_scale_factor);
+              log::info!("[CefWindow] Show handler: applying position {:?}", logical_position);
+              window.set_position(Some(&cef::Point {
+                x: logical_position.x,
+                y: logical_position.y,
+              }));
+            }
+
+            if let Some(cached_size) = &cached_size {
+              #[cfg(windows)]
+              let size_to_set: tauri_runtime::dpi::Size = {
+                let inner_size = cached_size.to_physical::<u32>(device_scale_factor);
+                crate::utils::windows::adjust_size(
+                  window.window_handle(),
+                  inner_size,
+                )
+                .into()
+              };
+              #[cfg(not(windows))]
+              let size_to_set: tauri_runtime::dpi::Size = cached_size.clone();
+
+              let logical_size = size_to_set.to_logical::<f32>(device_scale_factor);
+              log::info!("[CefWindow] Show handler: applying size {:?}", logical_size);
+              window.set_size(Some(&cef::Size {
+                width: logical_size.width as i32,
+                height: logical_size.height as i32,
+              }));
+            }
+          }
+        }
+
+        // 3. Show the window via CEF Views
         window.show();
       }
     }
@@ -3041,30 +3229,31 @@ fn handle_window_message<T: UserEvent>(
       }
     }
     #[allow(unused_mut)]
+    #[allow(unused_mut)]
     WindowMessage::SetSize(mut size) => {
-      if let Some(app_window) = context.windows.borrow().get(&window_id)
-        && let Some(window) = app_window.window()
-        && let Some(display) = window.display()
-      {
-        let device_scale_factor = display.device_scale_factor() as f64;
+      log::info!("[CefWindow] WindowMessage::SetSize: {:?}", size);
+      if let Some(app_window) = context.windows.borrow().get(&window_id) {
+        app_window.attributes.borrow_mut().inner_size = Some(size);
+        if let Some(window) = app_window.window() {
+          let device_scale_factor = window.display().map(|d| d.device_scale_factor() as f64).unwrap_or(1.0);
 
-        // On Windows, the size set via CEF APIs is the outer size (including borders),
-        // so we need to adjust it to set the correct inner size.
-        #[cfg(windows)]
-        {
-          let inner_size = size.to_physical::<u32>(device_scale_factor);
-          size = crate::utils::windows::adjust_size(
-            window.window_handle(),
-            inner_size,
-          )
-          .into();
+          #[cfg(windows)]
+          {
+            let inner_size = size.to_physical::<u32>(device_scale_factor);
+            size = crate::utils::windows::adjust_size(
+              window.window_handle(),
+              inner_size,
+            )
+            .into();
+          }
+
+          let logical_size = size.to_logical::<f32>(device_scale_factor);
+          log::info!("[CefWindow] Setting CEF window size via Views API: {:?}", logical_size);
+          window.set_size(Some(&cef::Size {
+            width: logical_size.width as i32,
+            height: logical_size.height as i32,
+          }));
         }
-
-        let logical_size = size.to_logical::<f32>(device_scale_factor);
-        window.set_size(Some(&cef::Size {
-          width: logical_size.width as i32,
-          height: logical_size.height as i32,
-        }));
       }
     }
     WindowMessage::SetMinSize(size) => {
@@ -3084,23 +3273,28 @@ fn handle_window_message<T: UserEvent>(
       }
     }
     WindowMessage::SetPosition(position) => {
-      if let Some(app_window) = context.windows.borrow().get(&window_id)
-        && let Some(window) = app_window.window()
-        && let Some(display) = window.display()
-      {
-        let device_scale_factor = display.device_scale_factor() as f64;
-        let logical_position = position.to_logical::<i32>(device_scale_factor);
-        window.set_position(Some(&cef::Point {
-          x: logical_position.x,
-          y: logical_position.y,
-        }));
+      log::info!("[CefWindow] WindowMessage::SetPosition: {:?}", position);
+      if let Some(app_window) = context.windows.borrow().get(&window_id) {
+        app_window.attributes.borrow_mut().position = Some(position);
+        if let Some(window) = app_window.window() {
+          let device_scale_factor = window.display().map(|d| d.device_scale_factor() as f64).unwrap_or(1.0);
+          let logical_position = position.to_logical::<i32>(device_scale_factor);
+          log::info!("[CefWindow] Setting CEF window position via Views API: {:?}", logical_position);
+          window.set_position(Some(&cef::Point {
+            x: logical_position.x,
+            y: logical_position.y,
+          }));
+        }
       }
     }
     WindowMessage::SetFullscreen(fullscreen) => {
-      if let Some(app_window) = context.windows.borrow().get(&window_id)
-        && let Some(window) = app_window.window()
-      {
-        window.set_fullscreen(if fullscreen { 1 } else { 0 });
+      if let Some(app_window) = context.windows.borrow().get(&window_id) {
+        app_window.attributes.borrow_mut().fullscreen = Some(fullscreen);
+        if let Some(window) = app_window.window() {
+          if window.is_visible() == 1 {
+            window.set_fullscreen(if fullscreen { 1 } else { 0 });
+          }
+        }
       }
     }
     #[cfg(target_os = "macos")]
@@ -3263,6 +3457,27 @@ wrap_task! {
   }
 }
 
+
+#[derive(serde::Deserialize, Clone)]
+struct PersistedStateEntry {
+  x: i32,
+  y: i32,
+  width: u32,
+  height: u32,
+  maximized: bool,
+  fullscreen: bool,
+}
+
+fn load_persisted_window_state(label: &str) -> Option<PersistedStateEntry> {
+  let path = dirs::config_dir()?.join("dev.jontitor.ralph-meet").join(".window-state.json");
+  if let Ok(content) = std::fs::read_to_string(path) {
+    if let Ok(states) = serde_json::from_str::<HashMap<String, PersistedStateEntry>>(&content) {
+      return states.get(label).cloned();
+    }
+  }
+  None
+}
+
 fn create_browser_window<T: UserEvent>(
   context: &Context<T>,
   window_id: WindowId,
@@ -3271,6 +3486,19 @@ fn create_browser_window<T: UserEvent>(
   window_builder: CefWindowBuilder,
   webview: PendingWebview<T, CefRuntime<T>>,
 ) {
+  eprintln!("[WindowState][create_browser_window] Called for label={}", label);
+  let mut window_builder = window_builder;
+  if let Some(entry) = load_persisted_window_state(&label) {
+    eprintln!(
+      "[WindowState][create_browser_window] Overriding window_builder bounds for label={}: x={}, y={}, w={}, h={}, max={}, fs={}",
+      label, entry.x, entry.y, entry.width, entry.height, entry.maximized, entry.fullscreen
+    );
+    window_builder.position = Some(Position::Physical(PhysicalPosition::new(entry.x, entry.y)));
+    window_builder.inner_size = Some(Size::Physical(PhysicalSize::new(entry.width, entry.height)));
+    window_builder.maximized = Some(entry.maximized);
+    window_builder.fullscreen = Some(entry.fullscreen);
+  }
+
   let PendingWebview {
     label: webview_label,
     opener: _,
@@ -3472,9 +3700,22 @@ pub(crate) fn create_window<T: UserEvent>(
 ) {
   let PendingWindow {
     label,
-    window_builder,
+    mut window_builder,
     webview,
   } = pending;
+
+  eprintln!("[WindowState][create_window] Called for label={}", label);
+
+  if let Some(entry) = load_persisted_window_state(&label) {
+    eprintln!(
+      "[WindowState][create_window] Overriding window_builder bounds for label={}: x={}, y={}, w={}, h={}, max={}, fs={}",
+      label, entry.x, entry.y, entry.width, entry.height, entry.maximized, entry.fullscreen
+    );
+    window_builder.position = Some(Position::Physical(PhysicalPosition::new(entry.x, entry.y)));
+    window_builder.inner_size = Some(Size::Physical(PhysicalSize::new(entry.width, entry.height)));
+    window_builder.maximized = Some(entry.maximized);
+    window_builder.fullscreen = Some(entry.fullscreen);
+  }
 
   if window_builder.browser_window {
     if let Some(webview) = webview {
