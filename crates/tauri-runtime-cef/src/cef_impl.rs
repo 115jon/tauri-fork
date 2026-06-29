@@ -3473,10 +3473,20 @@ struct PersistedStateEntry {
 }
 
 fn load_persisted_window_state(label: &str) -> Option<PersistedStateEntry> {
-  let path = dirs::config_dir()?.join("dev.jontitor.ralph-meet").join(".window-state.json");
-  if let Ok(content) = std::fs::read_to_string(path) {
-    if let Ok(states) = serde_json::from_str::<HashMap<String, PersistedStateEntry>>(&content) {
-      return states.get(label).cloned();
+  let mut candidate_paths = Vec::new();
+
+  if let Some(base) = dirs::config_dir() {
+    candidate_paths.push(base.join("RalphMeet").join(".window-state.json"));
+    candidate_paths.push(base.join("dev.jontitor.ralph-meet").join(".window-state.json"));
+  }
+
+  for path in candidate_paths {
+    if let Ok(content) = std::fs::read_to_string(path) {
+      if let Ok(states) = serde_json::from_str::<HashMap<String, PersistedStateEntry>>(&content) {
+        if let Some(state) = states.get(label).cloned() {
+          return Some(state);
+        }
+      }
     }
   }
   None

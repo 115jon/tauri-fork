@@ -46,6 +46,85 @@ use std::{
   time::Duration,
 };
 
+#[cfg(target_os = "windows")]
+const WINDOWS_CEF_PROFILE_DIR_NAME: &str = "RalphMeet";
+#[cfg(target_os = "windows")]
+const WINDOWS_CEF_PROFILE_SUBDIR: &str = "cef";
+#[cfg(target_os = "windows")]
+const LEGACY_WINDOWS_CEF_PROFILE_DIR_NAMES: &[&str] =
+  &["site.115jon.ralphmeet", "dev.jontitor.ralph-meet"];
+
+#[cfg(target_os = "windows")]
+fn copy_directory_contents_if_missing(
+  source: &std::path::Path,
+  destination: &std::path::Path,
+) -> std::io::Result<()> {
+  if !source.exists() {
+    return Ok(());
+  }
+
+  create_dir_all(destination)?;
+
+  for entry in std::fs::read_dir(source)? {
+    let entry = entry?;
+    let source_path = entry.path();
+    let destination_path = destination.join(entry.file_name());
+    let metadata = entry.metadata()?;
+
+    if metadata.is_dir() {
+      copy_directory_contents_if_missing(&source_path, &destination_path)?;
+      continue;
+    }
+
+    if destination_path.exists() {
+      continue;
+    }
+
+    if let Some(parent) = destination_path.parent() {
+      create_dir_all(parent)?;
+    }
+
+    std::fs::copy(&source_path, &destination_path)?;
+  }
+
+  Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_cef_cache_path(current_identifier: &str) -> std::path::PathBuf {
+  let cache_base = dirs::data_local_dir().unwrap_or_else(std::env::temp_dir);
+  let cache_path = cache_base
+    .join(WINDOWS_CEF_PROFILE_DIR_NAME)
+    .join(WINDOWS_CEF_PROFILE_SUBDIR);
+
+  if cache_path.exists() {
+    return cache_path;
+  }
+
+  if let Some(parent) = cache_path.parent() {
+    let _ = create_dir_all(parent);
+  }
+
+  for candidate in std::iter::once(current_identifier)
+    .chain(LEGACY_WINDOWS_CEF_PROFILE_DIR_NAMES.iter().copied())
+  {
+    let source = cache_base.join(candidate).join(WINDOWS_CEF_PROFILE_SUBDIR);
+    if source == cache_path || !source.exists() {
+      continue;
+    }
+
+    if std::fs::rename(&source, &cache_path).is_ok() {
+      return cache_path;
+    }
+
+    if copy_directory_contents_if_missing(&source, &cache_path).is_ok() {
+      return cache_path;
+    }
+  }
+
+  cache_path
+}
+
 #[cfg(target_os = "macos")]
 use crate::application::AppDelegateEvent;
 use crate::cef_webview::CefWebview;
@@ -2063,8 +2142,14 @@ impl<T: UserEvent> CefRuntime<T> {
 
     let _ = cef::api_hash(cef::sys::CEF_API_VERSION_LAST, 0);
 
-    let cache_base = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
-    let cache_path = cache_base.join(&runtime_args.identifier).join("cef");
+    #[cfg(target_os = "windows")]
+    let cache_path = windows_cef_cache_path(&runtime_args.identifier);
+
+    #[cfg(not(target_os = "windows"))]
+    let cache_path = dirs::cache_dir()
+      .unwrap_or_else(std::env::temp_dir)
+      .join(&runtime_args.identifier)
+      .join("cef");
 
     // Ensure the cache directory exists
     let _ = create_dir_all(&cache_path);

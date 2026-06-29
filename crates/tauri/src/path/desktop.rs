@@ -16,6 +16,34 @@ impl<R: Runtime> Clone for PathResolver<R> {
 }
 
 impl<R: Runtime> PathResolver<R> {
+  #[cfg(target_os = "windows")]
+  fn windows_roaming_app_root(&self) -> Result<PathBuf> {
+    let config = self.0.config();
+    let app_dir_name = config
+      .product_name
+      .clone()
+      .filter(|name| !name.is_empty())
+      .unwrap_or_else(|| config.identifier.clone());
+
+    dirs::config_dir()
+      .ok_or(Error::UnknownPath)
+      .map(|dir| dir.join(app_dir_name))
+  }
+
+  #[cfg(target_os = "windows")]
+  fn windows_local_app_root(&self) -> Result<PathBuf> {
+    let config = self.0.config();
+    let app_dir_name = config
+      .product_name
+      .clone()
+      .filter(|name| !name.is_empty())
+      .unwrap_or_else(|| config.identifier.clone());
+
+    dirs::data_local_dir()
+      .ok_or(Error::UnknownPath)
+      .map(|dir| dir.join(app_dir_name))
+  }
+
   /// Returns the final component of the `Path`, if there is one.
   ///
   /// If the path is a normal file, this is the file name. If it's the path of a directory, this
@@ -236,6 +264,12 @@ impl<R: Runtime> PathResolver<R> {
   ///
   /// Resolves to [`config_dir`](Self::config_dir)`/${bundle_identifier}`.
   pub fn app_config_dir(&self) -> Result<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+      return self.windows_roaming_app_root();
+    }
+
+    #[cfg(not(target_os = "windows"))]
     dirs::config_dir()
       .ok_or(Error::UnknownPath)
       .map(|dir| dir.join(&self.0.config().identifier))
@@ -245,6 +279,12 @@ impl<R: Runtime> PathResolver<R> {
   ///
   /// Resolves to [`data_dir`](Self::data_dir)`/${bundle_identifier}`.
   pub fn app_data_dir(&self) -> Result<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+      return self.windows_roaming_app_root();
+    }
+
+    #[cfg(not(target_os = "windows"))]
     dirs::data_dir()
       .ok_or(Error::UnknownPath)
       .map(|dir| dir.join(&self.0.config().identifier))
@@ -254,6 +294,12 @@ impl<R: Runtime> PathResolver<R> {
   ///
   /// Resolves to [`local_data_dir`](Self::local_data_dir)`/${bundle_identifier}`.
   pub fn app_local_data_dir(&self) -> Result<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+      return self.windows_roaming_app_root();
+    }
+
+    #[cfg(not(target_os = "windows"))]
     dirs::data_local_dir()
       .ok_or(Error::UnknownPath)
       .map(|dir| dir.join(&self.0.config().identifier))
@@ -263,6 +309,12 @@ impl<R: Runtime> PathResolver<R> {
   ///
   /// Resolves to [`cache_dir`](Self::cache_dir)`/${bundle_identifier}`.
   pub fn app_cache_dir(&self) -> Result<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+      return self.windows_roaming_app_root().map(|dir| dir.join("cache"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
     dirs::cache_dir()
       .ok_or(Error::UnknownPath)
       .map(|dir| dir.join(&self.0.config().identifier))
@@ -281,7 +333,10 @@ impl<R: Runtime> PathResolver<R> {
       .ok_or(Error::UnknownPath)
       .map(|dir| dir.join("Library/Logs").join(&self.0.config().identifier));
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(not(target_os = "macos"), target_os = "windows"))]
+    let path = self.windows_local_app_root().map(|dir| dir.join("logs"));
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     let path = dirs::data_local_dir()
       .ok_or(Error::UnknownPath)
       .map(|dir| dir.join(&self.0.config().identifier).join("logs"));
