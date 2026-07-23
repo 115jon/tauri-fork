@@ -2405,10 +2405,10 @@ fn start_window_dragging(window: &cef::Window) {
     let mut pos = std::mem::zeroed();
     let _ = GetCursorPos(&mut pos);
 
-    let points = POINTS {
-      x: pos.x as i16,
-      y: pos.y as i16,
-    };
+    // WM_NCLBUTTONDOWN expects the cursor position packed into LPARAM.
+    // Passing a pointer to POINTS is invalid after PostMessageW returns.
+    let packed_position =
+      ((pos.x as u32 & 0xffff) | ((pos.y as u32 & 0xffff) << 16)) as i32 as isize;
 
     let _ = ReleaseCapture();
 
@@ -2416,7 +2416,7 @@ fn start_window_dragging(window: &cef::Window) {
       Some(HWND(hwnd.0 as _)),
       WM_NCLBUTTONDOWN,
       WPARAM(HTCAPTION as usize),
-      LPARAM(&points as *const _ as isize),
+      LPARAM(packed_position),
     );
   }
 }
@@ -4122,6 +4122,11 @@ pub(crate) fn create_webview<T: UserEvent>(
     }
 
     window.add_child_view(Some(&mut View::from(&browser_view)));
+
+    #[cfg(windows)]
+    if let Some(window) = browser_view.window() {
+      drag_window::windows::subclass_browser_child_windows(&window);
+    }
 
     context
       .windows

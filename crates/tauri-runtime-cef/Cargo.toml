@@ -34,6 +34,7 @@ log = "0.4"
 windows = { version = "0.61", features = [
   "Win32_Graphics",
   "Win32_Graphics_Gdi",
+  "Win32_UI_Controls",
   "Win32_UI_HiDpi",
   "Win32_UI_Input",
   "Win32_UI_Input_KeyboardAndMouse",
