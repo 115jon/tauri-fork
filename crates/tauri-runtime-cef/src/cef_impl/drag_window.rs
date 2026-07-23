@@ -12,6 +12,9 @@ pub mod windows {
   };
   use windows::Win32::UI::Controls::MARGINS;
   use windows::Win32::UI::HiDpi::GetDpiForWindow;
+  use windows::Win32::UI::Input::KeyboardAndMouse::{
+    TME_LEAVE, TME_NONCLIENT, TRACKMOUSEEVENT, TrackMouseEvent,
+  };
   use windows::Win32::UI::WindowsAndMessaging::*;
   use windows::core::{PCWSTR, w};
 
@@ -32,6 +35,10 @@ pub mod windows {
   pub fn subclass_browser_child_windows(window: &cef::Window) {
     let hwnd = HWND(window.window_handle().0 as _);
     extend_dwm_frame(hwnd);
+    subclass_child_windows(hwnd);
+  }
+
+  fn subclass_child_windows(hwnd: HWND) {
     unsafe {
       let _ = EnumChildWindows(Some(hwnd), Some(subclass_child_window), LPARAM(0));
     }
@@ -48,15 +55,20 @@ pub mod windows {
   }
 
   fn extend_dwm_frame(hwnd: HWND) {
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
     let margins = MARGINS {
       cxLeftWidth: 0,
       cxRightWidth: 0,
-      cyTopHeight: TITLEBAR_HEIGHT,
+      cyTopHeight: frame_top_margin(dpi),
       cyBottomHeight: 0,
     };
     unsafe {
       let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
     }
+  }
+
+  fn frame_top_margin(dpi: u32) -> i32 {
+    scaled(TITLEBAR_HEIGHT, dpi.max(96))
   }
 
   fn enable_system_menu(hwnd: HWND) {
@@ -130,6 +142,27 @@ pub mod windows {
     wparam: WPARAM,
     lparam: LPARAM,
   ) -> LRESULT {
+    if msg == WM_PARENTNOTIFY && should_refresh_child_subclasses(wparam.0) {
+      let root = GetAncestor(hwnd, GA_ROOT);
+      if !root.is_invalid() {
+        subclass_child_windows(root);
+      }
+    }
+
+    if msg == WM_NCDESTROY {
+      let root = GetAncestor(hwnd, GA_ROOT);
+      if !root.is_invalid() {
+        let hover_child = GetPropW(root, HOVER_CHILD_WND_PROP);
+        if hover_child.0 == hwnd.0 as _ {
+          let _ = RemovePropW(root, HOVER_CHILD_WND_PROP);
+        }
+      }
+
+      let result = call_original_child_window_proc(hwnd, msg, wparam, lparam);
+      let _ = RemovePropW(hwnd, ORIGINAL_CHILD_WND_PROP);
+      return result;
+    }
+
     if msg == WM_SETCURSOR {
       let mut cursor = POINT::default();
       if GetCursorPos(&mut cursor).is_ok()
@@ -196,11 +229,25 @@ pub mod windows {
 
   #[cfg(test)]
   mod tests {
-    use super::mouse_lparam;
+    use super::{frame_top_margin, mouse_lparam, should_refresh_child_subclasses};
+    use windows::Win32::UI::WindowsAndMessaging::{WM_CREATE, WM_DESTROY};
 
     #[test]
     fn mouse_lparam_preserves_signed_screen_coordinates() {
       assert_eq!(mouse_lparam(-12, 640).0 as u32, 0x0280fff4);
+    }
+
+    #[test]
+    fn frame_margin_scales_with_window_dpi() {
+      assert_eq!(frame_top_margin(96), 28);
+      assert_eq!(frame_top_margin(144), 42);
+      assert_eq!(frame_top_margin(192), 56);
+    }
+
+    #[test]
+    fn child_subclasses_refresh_when_a_descendant_is_created() {
+      assert!(should_refresh_child_subclasses(WM_CREATE as usize));
+      assert!(!should_refresh_child_subclasses(WM_DESTROY as usize));
     }
   }
 
@@ -221,8 +268,20 @@ pub mod windows {
     wparam: WPARAM,
     lparam: LPARAM,
   ) -> LRESULT {
-    if msg == WM_ACTIVATE {
+    if msg == WM_ACTIVATE || msg == WM_DPICHANGED || msg == WM_DWMCOMPOSITIONCHANGED {
       extend_dwm_frame(hwnd);
+      subclass_child_windows(hwnd);
+    }
+
+    if msg == WM_PARENTNOTIFY && should_refresh_child_subclasses(wparam.0) {
+      subclass_child_windows(hwnd);
+    }
+
+    if msg == WM_NCDESTROY {
+      clear_native_mouse_hover(hwnd);
+      let result = call_original_window_proc(hwnd, msg, wparam, lparam);
+      let _ = RemovePropW(hwnd, ORIGINAL_WND_PROP);
+      return result;
     }
 
     if msg == WM_NCLBUTTONUP && wparam.0 == HTMAXBUTTON as usize {
@@ -240,6 +299,7 @@ pub mod windows {
     }
 
     if msg == WM_NCMOUSEMOVE && is_native_caption_hit_test(wparam.0 as i32) {
+      track_non_client_mouse_leave(hwnd);
       forward_native_mouse_move(hwnd, lparam);
       let _ = set_native_caption_cursor();
     } else if msg == WM_NCMOUSELEAVE {
@@ -287,6 +347,22 @@ pub mod windows {
     }
 
     call_original_window_proc(hwnd, msg, wparam, lparam)
+  }
+
+  fn should_refresh_child_subclasses(parent_notify: usize) -> bool {
+    parent_notify & 0xffff == WM_CREATE as usize
+  }
+
+  fn track_non_client_mouse_leave(hwnd: HWND) {
+    let mut tracking = TRACKMOUSEEVENT {
+      cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+      dwFlags: TME_LEAVE | TME_NONCLIENT,
+      hwndTrack: hwnd,
+      dwHoverTime: 0,
+    };
+    unsafe {
+      let _ = TrackMouseEvent(&mut tracking);
+    }
   }
 
   fn forward_native_mouse_move(hwnd: HWND, lparam: LPARAM) {
