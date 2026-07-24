@@ -2970,21 +2970,25 @@ fn handle_window_message<T: UserEvent>(
       }
     }
     WindowMessage::Maximize => {
-      if let Some(app_window) = context.windows.borrow().get(&window_id) {
+      if let Some(app_window) = context.windows.borrow_mut().get_mut(&window_id) {
         app_window.attributes.borrow_mut().maximized = Some(true);
         if let Some(window) = app_window.window() {
           if window.is_visible() == 1 {
             window.maximize();
+          } else {
+            app_window.pending_maximized = true;
           }
         }
       }
     }
     WindowMessage::Unmaximize => {
-      if let Some(app_window) = context.windows.borrow().get(&window_id) {
+      if let Some(app_window) = context.windows.borrow_mut().get_mut(&window_id) {
         app_window.attributes.borrow_mut().maximized = Some(false);
         if let Some(window) = app_window.window() {
           if window.is_visible() == 1 {
             window.restore();
+          } else {
+            app_window.pending_maximized = true;
           }
         }
       }
@@ -3000,89 +3004,113 @@ fn handle_window_message<T: UserEvent>(
       if let Some(app_window) = context.windows.borrow().get(&window_id)
         && let Some(window) = app_window.window()
       {
-        window.restore();
+        // CEF's restore() also exits maximized state. Tauri's unminimize()
+        // must leave a maximized window maximized, so only restore an actual
+        // minimized window.
+        if window.is_minimized() == 1 {
+          window.restore();
+        }
       }
     }
     WindowMessage::Show => {
-      if let Some(app_window) = context.windows.borrow().get(&window_id)
+      if let Some(app_window) = context.windows.borrow_mut().get_mut(&window_id)
         && let Some(window) = app_window.window()
       {
-        // 1. Get scale factor and cached attributes
-        let device_scale_factor = window
-          .display()
-          .map(|d| d.device_scale_factor() as f64)
-          .unwrap_or(1.0);
-        let (cached_pos, cached_size, cached_maximized, cached_fullscreen) = {
-          let attrs = app_window.attributes.borrow();
-          (
-            attrs.position.clone(),
-            attrs.inner_size.clone(),
-            attrs.maximized,
-            attrs.fullscreen,
-          )
-        };
+        let restore_initial_geometry = !app_window.has_been_shown;
+        app_window.has_been_shown = true;
 
-        // 2. Apply position/size/maximized/fullscreen synchronously BEFORE showing
-        log::info!(
-          "[CefWindow] Show handler executing synchronous restore BEFORE show: pos={:?}, size={:?}, max={:?}, fs={:?}",
-          cached_pos,
-          cached_size,
-          cached_maximized,
-          cached_fullscreen
-        );
+        if restore_initial_geometry {
+          let device_scale_factor = window
+            .display()
+            .map(|d| d.device_scale_factor() as f64)
+            .unwrap_or(1.0);
+          let (cached_pos, cached_size, cached_maximized, cached_fullscreen) = {
+            let attrs = app_window.attributes.borrow();
+            (
+              attrs.position.clone(),
+              attrs.inner_size.clone(),
+              attrs.maximized,
+              attrs.fullscreen,
+            )
+          };
 
-        let mut is_fullscreen = false;
-        if let Some(fullscreen) = cached_fullscreen {
-          if fullscreen {
-            log::info!("[CefWindow] Show handler: applying fullscreen");
+          log::info!(
+            "[CefWindow] Show handler applying initial geometry: pos={:?}, size={:?}, max={:?}, fs={:?}",
+            cached_pos,
+            cached_size,
+            cached_maximized,
+            cached_fullscreen
+          );
+
+          let mut is_fullscreen = false;
+          if cached_fullscreen == Some(true) {
             window.set_fullscreen(1);
             is_fullscreen = true;
           }
-        }
 
-        if !is_fullscreen {
-          let mut is_maximized = false;
-          if let Some(maximized) = cached_maximized {
-            if maximized {
-              log::info!("[CefWindow] Show handler: applying maximized");
+          if !is_fullscreen {
+            let mut is_maximized = false;
+            if cached_maximized == Some(true) {
               window.maximize();
               is_maximized = true;
             }
+
+            if !is_maximized {
+              if let Some(cached_pos) = &cached_pos {
+                let logical_position = cached_pos.to_logical::<i32>(device_scale_factor);
+                window.set_position(Some(&cef::Point {
+                  x: logical_position.x,
+                  y: logical_position.y,
+                }));
+              }
+
+              if let Some(cached_size) = &cached_size {
+                #[cfg(windows)]
+                let size_to_set: tauri_runtime::dpi::Size = {
+                  let inner_size = cached_size.to_physical::<u32>(device_scale_factor);
+                  crate::utils::windows::adjust_size(window.window_handle(), inner_size).into()
+                };
+                #[cfg(not(windows))]
+                let size_to_set: tauri_runtime::dpi::Size = cached_size.clone();
+
+                let logical_size = size_to_set.to_logical::<f32>(device_scale_factor);
+                window.set_size(Some(&cef::Size {
+                  width: logical_size.width as i32,
+                  height: logical_size.height as i32,
+                }));
+                }
+              }
+            }
           }
 
-          if !is_maximized {
-            if let Some(cached_pos) = &cached_pos {
-              let logical_position = cached_pos.to_logical::<i32>(device_scale_factor);
-              log::info!(
-                "[CefWindow] Show handler: applying position {:?}",
-                logical_position
-              );
-              window.set_position(Some(&cef::Point {
-                x: logical_position.x,
-                y: logical_position.y,
-              }));
-            }
+        let (pending_maximized, pending_fullscreen, desired_maximized, desired_fullscreen) = {
+          let attrs = app_window.attributes.borrow();
+          let pending = (
+            app_window.pending_maximized,
+            app_window.pending_fullscreen,
+            attrs.maximized == Some(true),
+            attrs.fullscreen == Some(true),
+          );
+          if !pending.1 || !pending.3 {
+            app_window.pending_maximized = false;
+          }
+          app_window.pending_fullscreen = false;
+          pending
+        };
 
-            if let Some(cached_size) = &cached_size {
-              #[cfg(windows)]
-              let size_to_set: tauri_runtime::dpi::Size = {
-                let inner_size = cached_size.to_physical::<u32>(device_scale_factor);
-                crate::utils::windows::adjust_size(window.window_handle(), inner_size).into()
-              };
-              #[cfg(not(windows))]
-              let size_to_set: tauri_runtime::dpi::Size = cached_size.clone();
-
-              let logical_size = size_to_set.to_logical::<f32>(device_scale_factor);
-              log::info!("[CefWindow] Show handler: applying size {:?}", logical_size);
-              window.set_size(Some(&cef::Size {
-                width: logical_size.width as i32,
-                height: logical_size.height as i32,
-              }));
-            }
+        if pending_fullscreen {
+          window.set_fullscreen(if desired_fullscreen { 1 } else { 0 });
+        }
+        if pending_maximized && !desired_fullscreen {
+          if desired_maximized {
+            window.maximize();
+          } else {
+            window.restore();
           }
         }
 
-        // 3. Show the window via CEF Views
+        // Later show() calls only change visibility; tray activation must not
+        // replay the state captured during startup.
         window.show();
       }
     }
@@ -3197,11 +3225,21 @@ fn handle_window_message<T: UserEvent>(
       }
     }
     WindowMessage::SetFullscreen(fullscreen) => {
-      if let Some(app_window) = context.windows.borrow().get(&window_id) {
+      if let Some(app_window) = context.windows.borrow_mut().get_mut(&window_id) {
         app_window.attributes.borrow_mut().fullscreen = Some(fullscreen);
         if let Some(window) = app_window.window() {
           if window.is_visible() == 1 {
             window.set_fullscreen(if fullscreen { 1 } else { 0 });
+            if !fullscreen && app_window.pending_maximized {
+              if app_window.attributes.borrow().maximized == Some(true) {
+                window.maximize();
+              } else {
+                window.restore();
+              }
+              app_window.pending_maximized = false;
+            }
+          } else {
+            app_window.pending_fullscreen = true;
           }
         }
       }
@@ -3591,6 +3629,9 @@ fn create_browser_window<T: UserEvent>(
       window: crate::AppWindowKind::BrowserWindow,
       force_close: force_close.clone(),
       attributes: attributes.clone(),
+      has_been_shown: attributes.borrow().visible.unwrap_or(true),
+      pending_maximized: false,
+      pending_fullscreen: false,
       webviews: vec![AppWebview {
         webview_id,
         browser_id: Arc::new(RefCell::new(browser_id_val)),
@@ -3664,6 +3705,7 @@ pub(crate) fn create_window<T: UserEvent>(
   );
 
   let window = window_create_top_level(Some(&mut delegate)).expect("Failed to create window");
+  let has_been_shown = attributes.borrow().visible.unwrap_or(true);
 
   context.windows.borrow_mut().insert(
     window_id,
@@ -3671,6 +3713,9 @@ pub(crate) fn create_window<T: UserEvent>(
       label,
       window: crate::AppWindowKind::Window(window),
       force_close,
+      has_been_shown,
+      pending_maximized: false,
+      pending_fullscreen: false,
       attributes,
       webviews: Vec::new(),
       window_event_listeners: Arc::new(Mutex::new(HashMap::new())),
