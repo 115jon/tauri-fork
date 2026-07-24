@@ -175,6 +175,11 @@ pub mod windows {
     }
 
     if msg == WM_NCHITTEST {
+      let root = GetAncestor(hwnd, GA_ROOT);
+      if !root.is_invalid() && custom_control_region(root, lparam) {
+        return LRESULT(HTCLIENT as isize);
+      }
+
       let hit_test = call_original_child_window_proc(hwnd, msg, wparam, lparam);
       if hit_test.0 as i32 == HTCLIENT as i32 && native_frame_region(hwnd, lparam) {
         return LRESULT(HTTRANSPARENT as isize);
@@ -229,7 +234,10 @@ pub mod windows {
 
   #[cfg(test)]
   mod tests {
-    use super::{frame_top_margin, mouse_lparam, should_refresh_child_subclasses};
+    use super::{
+      custom_control_region_for_rect, frame_top_margin, mouse_lparam,
+      should_refresh_child_subclasses,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{WM_CREATE, WM_DESTROY};
 
     #[test]
@@ -248,6 +256,24 @@ pub mod windows {
     fn child_subclasses_refresh_when_a_descendant_is_created() {
       assert!(should_refresh_child_subclasses(WM_CREATE as usize));
       assert!(!should_refresh_child_subclasses(WM_DESTROY as usize));
+    }
+
+    #[test]
+    fn custom_controls_use_client_hit_testing_at_multiple_dpi_scales() {
+      assert!(custom_control_region_for_rect(1120, 120, 0, 100, 1176, 96));
+      assert!(custom_control_region_for_rect(1000, 120, 0, 100, 1176, 144));
+      assert!(custom_control_region_for_rect(1050, 120, 0, 100, 1176, 144));
+      assert!(custom_control_region_for_rect(1120, 120, 0, 100, 1176, 144));
+      assert!(custom_control_region_for_rect(1000, 155, -1920, 100, 1176, 192));
+      assert!(!custom_control_region_for_rect(900, 120, 0, 100, 1176, 96));
+      assert!(!custom_control_region_for_rect(1120, 129, 0, 100, 1176, 96));
+      assert!(!custom_control_region_for_rect(986, 120, 0, 100, 1176, 120));
+    }
+
+    #[test]
+    fn custom_control_region_handles_negative_screen_origins() {
+      assert!(custom_control_region_for_rect(-800, 108, -1920, 100, -674, 96));
+      assert!(!custom_control_region_for_rect(-900, 108, -1920, 100, -674, 96));
     }
   }
 
@@ -307,6 +333,13 @@ pub mod windows {
     }
 
     if msg == WM_NCHITTEST {
+      if custom_control_region(hwnd, lparam) {
+        // The title bar controls are DOM buttons. Keep them in the client
+        // area so DPI changes cannot remap a visual maximize click to the
+        // native close/maximize caption hit-test path.
+        return LRESULT(HTCLIENT as isize);
+      }
+
       if let Some(result) = handle_dwm_message(hwnd, msg, wparam, lparam) {
         let hit_test = result.0 as i32;
         if hit_test == HTMAXBUTTON as i32
@@ -498,11 +531,43 @@ pub mod windows {
       return HTCLIENT as i32;
     }
 
-    if distance_from_right < button_width * 2 {
-      return HTMAXBUTTON as i32;
+    HTCAPTION as i32
+  }
+
+  fn custom_control_region(hwnd: HWND, lparam: LPARAM) -> bool {
+    let x = (lparam.0 as i16) as i32;
+    let y = ((lparam.0 >> 16) as i16) as i32;
+    let mut client_rect = RECT::default();
+    if unsafe { GetClientRect(hwnd, &mut client_rect) }.is_err() {
+      return false;
     }
 
-    HTCAPTION as i32
+    let mut client_origin = POINT { x: 0, y: 0 };
+    if !unsafe { ClientToScreen(hwnd, &mut client_origin) }.as_bool() {
+      return false;
+    }
+
+    let right = client_origin.x + client_rect.right;
+    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+    custom_control_region_for_rect(x, y, client_origin.x, client_origin.y, right, dpi)
+  }
+
+  fn custom_control_region_for_rect(
+    x: i32,
+    y: i32,
+    left: i32,
+    top: i32,
+    right: i32,
+    dpi: u32,
+  ) -> bool {
+    let titlebar_height = scaled(TITLEBAR_HEIGHT, dpi);
+    let control_width = scaled(CAPTION_BUTTON_WIDTH * 3, dpi);
+
+    y >= top
+      && y < top + titlebar_height
+      && x >= left
+      && x >= right - control_width
+      && x < right
   }
 
   fn scaled(value: i32, dpi: u32) -> i32 {
