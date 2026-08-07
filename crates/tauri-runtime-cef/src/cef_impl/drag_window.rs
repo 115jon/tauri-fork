@@ -235,9 +235,11 @@ pub mod windows {
   #[cfg(test)]
   mod tests {
     use super::{
-      custom_control_region_for_rect, frame_top_margin, mouse_lparam,
-      should_refresh_child_subclasses,
+      custom_caption_hit_test_for_rect, custom_control_region_for_rect, frame_top_margin,
+      mouse_lparam, scaled, should_refresh_child_subclasses, CAPTION_BUTTON_WIDTH,
+      TITLEBAR_HEIGHT, TITLEBAR_LEADING_WIDTH,
     };
+    use windows::Win32::UI::WindowsAndMessaging::{HTCAPTION, HTCLIENT, HTMAXBUTTON};
     use windows::Win32::UI::WindowsAndMessaging::{WM_CREATE, WM_DESTROY};
 
     #[test]
@@ -260,11 +262,15 @@ pub mod windows {
 
     #[test]
     fn custom_controls_use_client_hit_testing_at_multiple_dpi_scales() {
-      assert!(custom_control_region_for_rect(1120, 120, 0, 100, 1176, 96));
       assert!(custom_control_region_for_rect(1000, 120, 0, 100, 1176, 144));
-      assert!(custom_control_region_for_rect(1050, 120, 0, 100, 1176, 144));
       assert!(custom_control_region_for_rect(1120, 120, 0, 100, 1176, 144));
-      assert!(custom_control_region_for_rect(1000, 155, -1920, 100, 1176, 192));
+      assert!(!custom_control_region_for_rect(1120, 120, 0, 100, 1176, 96));
+      assert!(!custom_control_region_for_rect(
+        1080, 120, 0, 100, 1176, 144
+      ));
+      assert!(custom_control_region_for_rect(
+        1000, 155, -1920, 100, 1176, 192
+      ));
       assert!(!custom_control_region_for_rect(900, 120, 0, 100, 1176, 96));
       assert!(!custom_control_region_for_rect(1120, 129, 0, 100, 1176, 96));
       assert!(!custom_control_region_for_rect(986, 120, 0, 100, 1176, 120));
@@ -272,8 +278,73 @@ pub mod windows {
 
     #[test]
     fn custom_control_region_handles_negative_screen_origins() {
-      assert!(custom_control_region_for_rect(-800, 108, -1920, 100, -674, 96));
-      assert!(!custom_control_region_for_rect(-900, 108, -1920, 100, -674, 96));
+      assert!(custom_control_region_for_rect(
+        -799, 108, -1920, 100, -674, 96
+      ));
+      assert!(!custom_control_region_for_rect(
+        -900, 108, -1920, 100, -674, 96
+      ));
+    }
+
+    #[test]
+    fn custom_caption_geometry_keeps_maximize_native_and_other_controls_client() {
+      let dpi = 96;
+      let leading_width = scaled(TITLEBAR_LEADING_WIDTH, dpi);
+      let titlebar_height = scaled(TITLEBAR_HEIGHT, dpi);
+      let button_width = scaled(CAPTION_BUTTON_WIDTH, dpi);
+
+      assert_eq!(
+        custom_caption_hit_test_for_rect(
+          1113,
+          120,
+          0,
+          100,
+          1176,
+          leading_width,
+          titlebar_height,
+          button_width,
+        ),
+        HTMAXBUTTON as i32
+      );
+      assert_eq!(
+        custom_caption_hit_test_for_rect(
+          1071,
+          120,
+          0,
+          100,
+          1176,
+          leading_width,
+          titlebar_height,
+          button_width,
+        ),
+        HTCLIENT as i32
+      );
+      assert_eq!(
+        custom_caption_hit_test_for_rect(
+          1155,
+          120,
+          0,
+          100,
+          1176,
+          leading_width,
+          titlebar_height,
+          button_width,
+        ),
+        HTCLIENT as i32
+      );
+      assert_eq!(
+        custom_caption_hit_test_for_rect(
+          1000,
+          120,
+          0,
+          100,
+          1176,
+          leading_width,
+          titlebar_height,
+          button_width,
+        ),
+        HTCAPTION as i32
+      );
     }
   }
 
@@ -333,32 +404,26 @@ pub mod windows {
     }
 
     if msg == WM_NCHITTEST {
+      // The DOM titlebar owns the visual button geometry. Resolve that
+      // geometry before asking DWM so a transient frame calculation cannot
+      // turn a maximize click into a native close/minimize hit test.
+      let custom_hit_test = custom_caption_hit_test(hwnd, lparam);
+      if custom_hit_test == HTMAXBUTTON as i32 || custom_hit_test == HTCAPTION as i32 {
+        return LRESULT(custom_hit_test as isize);
+      }
+
       if custom_control_region(hwnd, lparam) {
-        // The title bar controls are DOM buttons. Keep them in the client
-        // area so DPI changes cannot remap a visual maximize click to the
-        // native close/maximize caption hit-test path.
         return LRESULT(HTCLIENT as isize);
       }
 
       if let Some(result) = handle_dwm_message(hwnd, msg, wparam, lparam) {
         let hit_test = result.0 as i32;
-        if hit_test == HTMAXBUTTON as i32
-          || hit_test == HTCAPTION as i32
-          || hit_test == HTMINBUTTON as i32
-          || hit_test == HTCLOSE as i32
-        {
-          return result;
-        }
-
         if hit_test != HTCLIENT as i32 {
           return result;
         }
       }
 
-      let hit_test = custom_caption_hit_test(hwnd, lparam);
-      if hit_test != HTCLIENT as i32 {
-        return LRESULT(hit_test as isize);
-      }
+      return LRESULT(HTCLIENT as isize);
     } else if let Some(result) = handle_dwm_message(hwnd, msg, wparam, lparam) {
       return result;
     }
@@ -519,15 +584,46 @@ pub mod windows {
     let right = client_origin.x + client_rect.right;
     let top = client_origin.y;
 
-    if y < top || y >= top + titlebar_height || x < client_origin.x || x >= right {
+    custom_caption_hit_test_for_rect(
+      x,
+      y,
+      client_origin.x,
+      top,
+      right,
+      leading_width,
+      titlebar_height,
+      button_width,
+    )
+  }
+
+  fn custom_caption_hit_test_for_rect(
+    x: i32,
+    y: i32,
+    left: i32,
+    top: i32,
+    right: i32,
+    leading_width: i32,
+    titlebar_height: i32,
+    button_width: i32,
+  ) -> i32 {
+    if y < top || y >= top + titlebar_height || x < left || x >= right {
+      return HTCLIENT as i32;
+    }
+
+    if x < left + leading_width {
       return HTCLIENT as i32;
     }
 
     let distance_from_right = right - x;
-    if distance_from_right < button_width
-      || (distance_from_right >= button_width * 2 && distance_from_right < button_width * 3)
-      || x < client_origin.x + leading_width
-    {
+    if distance_from_right < button_width {
+      return HTCLIENT as i32;
+    }
+
+    if distance_from_right < button_width * 2 {
+      return HTMAXBUTTON as i32;
+    }
+
+    if distance_from_right < button_width * 3 {
       return HTCLIENT as i32;
     }
 
@@ -561,13 +657,18 @@ pub mod windows {
     dpi: u32,
   ) -> bool {
     let titlebar_height = scaled(TITLEBAR_HEIGHT, dpi);
-    let control_width = scaled(CAPTION_BUTTON_WIDTH * 3, dpi);
+    let button_width = scaled(CAPTION_BUTTON_WIDTH, dpi);
+    let distance_from_right = right - x;
 
     y >= top
       && y < top + titlebar_height
       && x >= left
-      && x >= right - control_width
       && x < right
+      // Keep minimize and close in the DOM client area. The maximize button
+      // must remain native so DWM can expose Windows Snap Layouts on hover.
+      && (distance_from_right < button_width
+        || (distance_from_right >= button_width * 2
+          && distance_from_right < button_width * 3))
   }
 
   fn scaled(value: i32, dpi: u32) -> i32 {
