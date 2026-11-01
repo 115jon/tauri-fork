@@ -10,9 +10,10 @@ use std::{
   collections::HashMap,
   sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicU32, Ordering},
+    atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering},
     mpsc::channel,
   },
+  time::{Duration, Instant},
 };
 use tauri_runtime::{
   ExitRequestedEventAction, RunEvent, UserEvent,
@@ -255,6 +256,13 @@ pub struct Context<T: UserEvent> {
   pub next_window_event_id: Arc<AtomicU32>,
   pub next_webview_event_id: Arc<AtomicU32>,
   pub scheme_handler_registry: SchemeHandlerRegistry,
+  /// Browsers between `on_after_created` and `on_before_close`, keyed by id.
+  /// `cef::shutdown()` must not run while any remain.
+  pub live_browsers: Arc<RefCell<HashMap<i32, Browser>>>,
+  /// Set once `run()` starts tearing down; suppresses app exit callbacks.
+  pub shutting_down: Arc<AtomicBool>,
+  /// Code from the last `RequestExit`, used if CEF shutdown has to be skipped.
+  pub exit_code: Arc<AtomicI32>,
 }
 
 impl<T: UserEvent> Context<T> {
@@ -923,13 +931,34 @@ wrap_life_span_handler! {
 
   impl LifeSpanHandler {
     fn on_after_created(&self, browser: Option<&mut Browser>) {
-      if let Some(browser) = browser
-        && let Some(initial_url) = &self.initial_url {
-          check_and_reload_if_blank(browser.clone(), initial_url.clone());
+      let Some(browser) = browser else {
+        return;
+      };
+      self
+        .context
+        .live_browsers
+        .borrow_mut()
+        .insert(browser.identifier(), browser.clone());
+      if self.context.shutting_down.load(Ordering::SeqCst) {
+        // Created while run() is tearing down; close it so shutdown can proceed.
+        if let Some(host) = browser.host() {
+          host.close_browser(1);
         }
+        return;
+      }
+      if let Some(initial_url) = &self.initial_url {
+        check_and_reload_if_blank(browser.clone(), initial_url.clone());
+      }
     }
 
     fn on_before_close(&self, browser: Option<&mut Browser>) {
+      if let Some(browser) = &browser {
+        self
+          .context
+          .live_browsers
+          .borrow_mut()
+          .remove(&browser.identifier());
+      }
       match self.window_kind {
         WindowKind::Browser => {
           on_window_destroyed(self.window_id, &self.context);
@@ -3368,6 +3397,10 @@ pub fn handle_message<T: UserEvent>(context: &Context<T>, message: Message<T>) {
       message,
     } => handle_webview_message(context, window_id, webview_id, message),
     Message::RequestExit(code) => {
+      if context.shutting_down.load(Ordering::SeqCst) {
+        return;
+      }
+      context.exit_code.store(code, Ordering::SeqCst);
       let (tx, rx) = channel();
       (context.callback.borrow())(RunEvent::ExitRequested {
         code: Some(code),
@@ -3846,6 +3879,74 @@ fn close_window_browsers(
   all_closed
 }
 
+/// Force-closes every browser and window, then pumps CEF until each browser has
+/// reached `on_before_close` or `timeout` passes. Returns whether none remain.
+///
+/// `cef::shutdown()` with a live browser crashes (null deref in
+/// `CefBrowserContentsDelegate::RenderFrameDeleted` while the profile is
+/// destroyed), so `run()` must call this first.
+pub(crate) fn close_all_browsers_for_shutdown<T: UserEvent>(
+  context: &Context<T>,
+  timeout: Duration,
+) -> bool {
+  context.shutting_down.store(true, Ordering::SeqCst);
+
+  let (cef_windows, mut hosts) = {
+    let windows = context.windows.borrow();
+    let cef_windows: Vec<_> = windows
+      .values()
+      .filter_map(|app_window| {
+        // Skip the CloseRequested round trip in can_close.
+        app_window.force_close.store(true, Ordering::SeqCst);
+        app_window.window()
+      })
+      .collect();
+    let hosts: HashMap<i32, BrowserHost> = windows
+      .values()
+      .flat_map(|app_window| app_window.webviews.iter())
+      .filter_map(|webview| webview.inner.browser())
+      .filter_map(|browser| Some((browser.identifier(), browser.host()?)))
+      .collect();
+    (cef_windows, hosts)
+  };
+  // Popups and DevTools are only reachable through the live set.
+  hosts.extend(
+    context
+      .live_browsers
+      .borrow()
+      .iter()
+      .filter_map(|(id, browser)| Some((*id, browser.host()?))),
+  );
+
+  log::info!(
+    "[CefShutdown] closing {} browser(s) and {} window(s)",
+    hosts.len(),
+    cef_windows.len()
+  );
+  // Force close: try_close_browser can be vetoed by beforeunload.
+  for host in hosts.into_values() {
+    host.close_browser(1);
+  }
+  for window in cef_windows {
+    window.close();
+  }
+
+  let deadline = Instant::now() + timeout;
+  loop {
+    let remaining = context.live_browsers.borrow().len();
+    if remaining == 0 {
+      log::info!("[CefShutdown] all browsers closed");
+      return true;
+    }
+    if Instant::now() >= deadline {
+      log::warn!("[CefShutdown] {remaining} browser(s) still open after {timeout:?}");
+      return false;
+    }
+    cef::do_message_loop_work();
+    std::thread::sleep(Duration::from_millis(1));
+  }
+}
+
 fn on_window_close(window_id: WindowId, windows: &Arc<RefCell<HashMap<WindowId, AppWindow>>>) {
   let cef_window = {
     let windows_ref = windows.borrow();
@@ -3885,6 +3986,12 @@ fn on_window_destroyed<T: UserEvent>(window_id: WindowId, context: &Context<T>) 
   }
 
   drop(removed_window);
+
+  // While run() closes every browser for shutdown, the exit is already decided:
+  // don't ask the app again (it may Prevent for close-to-tray or re-request exit).
+  if context.shutting_down.load(Ordering::SeqCst) {
+    return;
+  }
 
   let is_empty = context.windows.borrow().is_empty();
   if is_empty {

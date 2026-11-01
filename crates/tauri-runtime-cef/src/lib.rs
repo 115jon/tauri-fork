@@ -2151,6 +2151,9 @@ impl<T: UserEvent> CefRuntime<T> {
       next_window_id: Default::default(),
       next_window_event_id: Default::default(),
       scheme_handler_registry: Default::default(),
+      live_browsers: Default::default(),
+      shutting_down: Default::default(),
+      exit_code: Default::default(),
     };
 
     let mut command_line_args = Vec::new();
@@ -2510,11 +2513,26 @@ impl<T: UserEvent> Runtime<T> for CefRuntime<T> {
       }
     }
 
-    cef::shutdown();
+    // CEF requires every browser to reach on_before_close before CefShutdown.
+    let cef_context = &self.context.cef_context;
+    let all_closed = cef_impl::close_all_browsers_for_shutdown(cef_context, Duration::from_secs(3));
+    if all_closed {
+      cef::shutdown();
+    }
 
     // Final Exit event
     // use callback_ directly because cef_context.callback posts Exit events to the event loop rx
     (callback_.borrow_mut())(RunEvent::Exit);
+
+    if !all_closed {
+      // CefShutdown with a live browser is the known crash-on-quit (and WER then
+      // leaves a frozen ghost window). Skipping it only leaks state the OS
+      // reclaims at process exit, so exit here instead of returning to main.
+      let code = cef_context
+        .exit_code
+        .load(std::sync::atomic::Ordering::SeqCst);
+      std::process::exit(code);
+    }
   }
 
   fn cursor_position(&self) -> Result<PhysicalPosition<f64>> {
