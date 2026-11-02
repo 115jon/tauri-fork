@@ -375,7 +375,11 @@ wrap_browser_process_handler! {
             return 1;
           }
         }
-      // TODO: add event
+      // Any other relaunch (a shortcut, the taskbar, the root launcher):
+      // Chromium's process singleton caught it before the app's own
+      // single-instance handling could run. Tell the app with an empty
+      // `Opened` so it can bring its window back.
+      (self.context.callback.borrow())(RunEvent::Opened { urls: Vec::new() });
       1
     }
   }

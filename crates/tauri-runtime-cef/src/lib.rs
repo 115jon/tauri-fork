@@ -2194,15 +2194,22 @@ impl<T: UserEvent> CefRuntime<T> {
       cache_path: cache_path.to_string_lossy().to_string().as_str().into(),
       ..Default::default()
     };
-    assert_eq!(
-      cef::initialize(
-        Some(args.as_main_args()),
-        Some(&settings),
-        Some(&mut app),
-        std::ptr::null_mut()
-      ),
-      1
+    let initialized = cef::initialize(
+      Some(args.as_main_args()),
+      Some(&settings),
+      Some(&mut app),
+      std::ptr::null_mut(),
     );
+    if initialized != 1 {
+      let code = cef::get_exit_code();
+      // Another instance already owns this profile: Chromium's process
+      // singleton forwarded our command line to it
+      // (`on_already_running_app_relaunch`), so this process is done.
+      if code == cef::sys::cef_resultcode_t::CEF_RESULT_CODE_NORMAL_EXIT_PROCESS_NOTIFIED as i32 {
+        std::process::exit(0);
+      }
+      panic!("cef::initialize failed (exit code {code})");
+    }
 
     let main_thread_id = thread::current().id();
     let context = RuntimeContext {
