@@ -44,8 +44,10 @@ use std::{
   time::Duration,
 };
 
+/// The app's roaming data folder (`%APPDATA%\Yap`, the productName). The app
+/// moves Ralph Meet's `%APPDATA%\RalphMeet` here before the runtime starts.
 #[cfg(target_os = "windows")]
-const WINDOWS_CEF_PROFILE_DIR_NAME: &str = "RalphMeet";
+const WINDOWS_CEF_PROFILE_DIR_NAME: &str = "Yap";
 #[cfg(target_os = "windows")]
 const WINDOWS_CEF_PROFILE_SUBDIR: &str = "cef";
 #[cfg(target_os = "windows")]

@@ -3453,6 +3453,7 @@ fn load_persisted_window_state(label: &str) -> Option<PersistedStateEntry> {
   let mut candidate_paths = Vec::new();
 
   if let Some(base) = dirs::config_dir() {
+    candidate_paths.push(base.join("Yap").join(".window-state.json"));
     candidate_paths.push(base.join("RalphMeet").join(".window-state.json"));
     candidate_paths.push(
       base
